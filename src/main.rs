@@ -38,7 +38,7 @@ use crate::text::Text;
 use chrono::Timelike;
 use std::ffi::{c_int, CString};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const WEBOS: bool = cfg!(all(target_os = "linux", target_arch = "arm"));
 const HOME_ID: &str = "com.webos.app.home";
@@ -127,7 +127,7 @@ fn run(started: Instant) -> Result<(), String> {
     // Language: the user's choice, else the TV's.
     strings::set(&if prefs.ui.language.is_empty() { strings::system_language() } else { prefs.ui.language.clone() });
     // Fonts load and UI glyphs rasterise in parallel with SDL/GL bring-up.
-    let glyphs = text::prewarm(assets.join("fonts"), theme::prewarm_jobs(strings::current()));
+    let glyphs = text::prewarm(assets.join("fonts"), theme::prewarm_jobs(strings::current()), Some(data_dir.join("glyphs.cache")));
 
     if WEBOS {
         // SDL-webOS reads APPID for its shell surface and WMCLASS from the environment.
@@ -135,6 +135,7 @@ fn run(started: Instant) -> Result<(), String> {
         std::env::set_var("APPID", surface);
         std::env::set_var("SDL_VIDEO_WAYLAND_WMCLASS", surface);
     }
+    let t_prefs = started.elapsed();
     let sdl = Sdl::open(&sdl_candidates(&exe_dir))?;
     if WEBOS {
         sdl.hint("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
@@ -148,6 +149,7 @@ fn run(started: Instant) -> Result<(), String> {
     if unsafe { (sdl.init)(sdl::INIT_VIDEO | sdl::INIT_EVENTS) } != 0 {
         return Err(format!("SDL_Init: {}", sdl.error()));
     }
+    let t_sdl = started.elapsed();
     let (window, context, es) = create_window(&sdl)?;
     unsafe { (sdl.gl_set_swap_interval)(1) };
     // The Magic Remote pointer stays visible: webOS draws it and hides it on key presses.
@@ -164,12 +166,21 @@ fn run(started: Instant) -> Result<(), String> {
         gl.string(gl::VERSION)
     );
     let mut renderer = Renderer::new(gl, es)?;
+    let t_window = started.elapsed();
     let glyph_wait = Instant::now();
     let prewarmed = glyphs.join().map_err(|_| "glyph thread panicked".to_string())??;
+    let cached = prewarmed.from_cache();
     let mut text = Text::new(&renderer, prewarmed);
-    log!("glyphs: {} prewarmed, waited {} ms", text.glyph_count(), glyph_wait.elapsed().as_millis());
+    log!(
+        "glyphs: {} {}, waited {} ms",
+        text.glyph_count(),
+        if cached { "from cache" } else { "prewarmed" },
+        glyph_wait.elapsed().as_millis()
+    );
+    let t_glyphs = started.elapsed();
     let mut home = Home::new(&renderer, prefs);
     home.set_home_mode(home_mode);
+    let t_home = started.elapsed();
     let bus = if home_mode {
         let bus = register_home(sdl.waker())?;
         log!("running as Home");
@@ -189,7 +200,17 @@ fn run(started: Instant) -> Result<(), String> {
         bus,
     );
     let io = Io { platform: &platform, services: &services, home_mode, video: &preview };
-    log!("init: {} ms", started.elapsed().as_millis());
+    let ms = |d: Duration| d.as_millis();
+    log!(
+        "init: {} ms (prefs {}, sdl {}, window+gl {}, glyphs {}, home {}, register+workers {})",
+        ms(started.elapsed()),
+        ms(t_prefs),
+        ms(t_sdl - t_prefs),
+        ms(t_window - t_sdl),
+        ms(t_glyphs - t_window),
+        ms(t_home - t_glyphs),
+        ms(started.elapsed() - t_home)
+    );
 
     let mut perf = Perf::default();
     let mut dirty = true;
