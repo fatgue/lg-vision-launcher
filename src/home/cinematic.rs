@@ -4,13 +4,14 @@ use super::*;
 impl Home {
     pub fn draw(&mut self, r: &mut Renderer, text: &mut Text, now: &chrono::DateTime<chrono::Local>) {
         match self.look {
-            Look::Cinematic | Look::Glass => self.draw_cinematic(r, text, now),
+            Look::Cinematic => self.draw_cinematic(r, text, now),
+            Look::Glass => self.draw_glass(r, text, now),
         }
     }
 
-    pub(super) fn draw_cinematic(&mut self, r: &mut Renderer, text: &mut Text, now: &chrono::DateTime<chrono::Local>) {
+    /// The header's clock and (when shown) date.
+    pub(super) fn clock_and_date(&self, now: &chrono::DateTime<chrono::Local>) -> (String, String) {
         use chrono::{Datelike, Timelike};
-        self.hits.borrow_mut().clear();
         let ui = &self.prefs.ui;
         let clock = if ui.clock24 {
             format!("{:02}:{:02}", now.hour(), now.minute())
@@ -18,12 +19,17 @@ impl Home {
             let (pm, hour) = now.hour12();
             format!("{hour}:{:02} {}", now.minute(), if pm { "PM" } else { "AM" })
         };
-        let s = self.strings;
         let date = if ui.show_date {
-            s.date(now.weekday().num_days_from_monday() as usize, now.day(), now.month0() as usize)
+            self.strings.date(now.weekday().num_days_from_monday() as usize, now.day(), now.month0() as usize)
         } else {
             String::new()
         };
+        (clock, date)
+    }
+
+    pub(super) fn draw_cinematic(&mut self, r: &mut Renderer, text: &mut Text, now: &chrono::DateTime<chrono::Local>) {
+        self.hits.borrow_mut().clear();
+        let (clock, date) = self.clock_and_date(now);
         self.draw_backdrop(r);
         if self.preview.is_some() {
             r.punch(PREVIEW_RECT);
@@ -133,6 +139,8 @@ impl Home {
                         icon: self.icons.get(&tile.id).copied(),
                         art: self.arts.get(&tile.id).map(|(_, uv)| *uv),
                         fill: self.blended.get(&tile.id).copied(),
+                        radius: TILE_RADIUS,
+                        ring: true,
                     };
                     if pass == 0 && alpha > 0.5 && matches!(self.mode, Mode::Browse) {
                         self.hits.borrow_mut().push((rect, Target::Tile { rail: index, index: i }));
@@ -168,6 +176,9 @@ pub(super) struct TileView {
     pub(super) icon: Option<[f32; 5]>,
     pub(super) art: Option<[f32; 4]>,
     pub(super) fill: Option<Rgba>,
+    pub(super) radius: f32,
+    /// Cinematic focus: coloured glow, ring and the title under the tile. Glass draws its own.
+    pub(super) ring: bool,
 }
 
 pub(super) fn draw_hero_block(r: &mut Renderer, text: &mut Text, hero: &Hero, alpha: f32, dy: f32, accent: Rgba, width: f32) {
@@ -195,7 +206,7 @@ pub(super) fn draw_hero_block(r: &mut Renderer, text: &mut Text, hero: &Hero, al
 
 pub(super) fn draw_tile_shapes(r: &mut Renderer, tile: &Tile, v: &TileView) {
     let (rect, f, alpha) = (v.rect, v.f, v.alpha);
-    if f > 0.0 {
+    if v.ring && f > 0.0 {
         r.shadow(rect, TILE_RADIUS * 2.0, 80.0, tile.accent.alpha(0.45 * f * alpha));
         r.shadow(rect.offset(0.0, 30.0 + 16.0 * v.lifted), TILE_RADIUS, 60.0 + 30.0 * v.lifted, Rgba::hex(0).alpha(0.55 * f * alpha));
     }
@@ -203,7 +214,7 @@ pub(super) fn draw_tile_shapes(r: &mut Renderer, tile: &Tile, v: &TileView) {
         (None, Some(edge)) => edge,
         _ => tile.bg,
     };
-    r.rect(rect, TILE_RADIUS, fill.fade(alpha));
+    r.rect(rect, v.radius, fill.fade(alpha));
     match tile.kind {
         Kind::Input { connected } | Kind::Setting { connected, .. } => {
             let dot = if connected { CONNECTED } else { TEXT.alpha(0.3) };
@@ -230,7 +241,7 @@ pub(super) fn draw_tile_art(r: &mut Renderer, atlas: Texture, v: &TileView) {
     let Some(uv) = v.art else { return };
     // Unfocused artwork sits back slightly so the focused tile reads first.
     let light = 0.78 + 0.22 * v.f;
-    r.image(atlas, v.rect, uv, TILE_RADIUS, Rgba { r: light, g: light, b: light, a: v.alpha });
+    r.image(atlas, v.rect, uv, v.radius, Rgba { r: light, g: light, b: light, a: v.alpha });
 }
 
 pub(super) fn draw_tile_icon(r: &mut Renderer, atlas: Texture, v: &TileView) {
@@ -249,15 +260,15 @@ pub(super) fn draw_tile_icon(r: &mut Renderer, atlas: Texture, v: &TileView) {
 
 pub(super) fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: &TileView, s: &Strings) {
     let (rect, f, alpha) = (v.rect, v.f, v.alpha);
-    if f < 1.0 {
+    if v.ring && f < 1.0 {
         r.stroke(rect.inflate(-0.5), TILE_RADIUS, 1.0, TEXT.alpha(0.10 * (1.0 - f) * alpha));
     }
-    if f > 0.0 {
+    if v.ring && f > 0.0 {
         let ring = TEXT.lerp(tile.accent, v.lifted);
         r.stroke(rect.inflate(RING_OFFSET + RING_WIDTH * 0.5), TILE_RADIUS + RING_OFFSET, RING_WIDTH, ring.alpha(f * alpha));
     }
     let label_below = |text: &mut Text, r: &mut Renderer| {
-        if f > 0.01 {
+        if v.ring && f > 0.01 {
             let w = text.measure(r, &tile.title, TILE_LABEL);
             text.draw_top(r, &tile.title, rect.x + (rect.w - w) * 0.5, rect.y + rect.h + 22.0, TILE_LABEL, TEXT.alpha(f * alpha));
         }
@@ -341,11 +352,16 @@ pub(super) fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: 
 
 /// A small gear: a ring with eight teeth and a hub.
 pub(super) fn draw_gear(r: &mut Renderer, area: Rect, color: Rgba) {
-    let (cx, cy) = (area.x + area.w * 0.5, area.y + area.h * 0.5);
+    draw_gear_at(r, area.x + area.w * 0.5, area.y + area.h * 0.5, 1.0, color);
+}
+
+pub(super) fn draw_gear_at(r: &mut Renderer, cx: f32, cy: f32, scale: f32, color: Rgba) {
     for i in 0..8 {
         let angle = i as f32 * std::f32::consts::FRAC_PI_4;
-        let (tx, ty) = (cx + angle.cos() * 15.0, cy + angle.sin() * 15.0);
-        r.rect(Rect::new(tx - 4.5, ty - 4.5, 9.0, 9.0), 3.0, color);
+        let (tx, ty) = (cx + angle.cos() * 15.0 * scale, cy + angle.sin() * 15.0 * scale);
+        let tooth = 9.0 * scale;
+        r.rect(Rect::new(tx - tooth * 0.5, ty - tooth * 0.5, tooth, tooth), 3.0 * scale, color);
     }
-    r.stroke(Rect::new(cx - 11.0, cy - 11.0, 22.0, 22.0), 11.0, 6.0, color);
+    let ring = 22.0 * scale;
+    r.stroke(Rect::new(cx - ring * 0.5, cy - ring * 0.5, ring, ring), ring * 0.5, 6.0 * scale, color);
 }

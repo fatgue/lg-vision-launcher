@@ -11,13 +11,11 @@ impl Home {
         }
         r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(0.6 * open));
         let Some(tile) = self.focused() else { return };
-        let rail = &self.rails[self.active];
         let (row_h, pad, width) = (68.0, 16.0, 460.0);
         let height = 64.0 + pad + menu.items.len() as f32 * row_h + pad;
-        let title_y = RAIL_TITLE_Y + self.rail_slot(self.active) as f32 * RAIL_PITCH + self.vscroll.value;
-        let tile_x = rail.slot_x(rail.focus as f32) - rail.scroll.value;
+        let (tile_x, above) = self.menu_anchor();
         let x = tile_x.clamp(SAFE_X, LOGICAL_W - SAFE_X - width);
-        let y = title_y - height - 24.0 + 16.0 * (1.0 - open);
+        let y = above - height - 24.0 + 16.0 * (1.0 - open);
         let panel = Rect::new(x, y, width, height);
         draw_panel(r, panel, open);
         let row = |i: usize| Rect::new(x + pad, y + 64.0 + pad + i as f32 * row_h, width - 2.0 * pad, row_h - 8.0);

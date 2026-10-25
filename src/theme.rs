@@ -38,13 +38,30 @@ impl Look {
     }
 
     pub fn background(self) -> Rgba {
-        BG
+        match self {
+            Look::Cinematic => BG,
+            Look::Glass => GLASS_BG,
+        }
     }
 
     pub fn prewarm_jobs(self, strings: &Strings) -> Vec<(Style, String)> {
-        prewarm_jobs(strings)
+        let mut jobs = prewarm_jobs(strings);
+        if self == Look::Glass {
+            let latin: String = (' '..='~').collect();
+            let ui = format!("{}{}", crate::strings::charset(strings), "0123456789:, ");
+            for style in [GLASS_LABEL, GLASS_SECTION, GLASS_CLOCK] {
+                jobs.push((style, latin.clone() + &ui));
+            }
+        }
+        jobs
     }
 }
+
+// Glass (inspired by tvOS): near-black, white text, small radii, no focus ring.
+pub const GLASS_BG: Rgba = Rgba::hex(0x0B0B0F);
+pub const GLASS_LABEL: Style = Style::new(Weight::SemiBold, 26.0);
+pub const GLASS_SECTION: Style = Style::new(Weight::SemiBold, 30.0);
+pub const GLASS_CLOCK: Style = Style::new(Weight::Medium, 32.0);
 
 pub const BG: Rgba = Rgba::hex(0x07080B);
 pub const TEXT: Rgba = Rgba::hex(0xF5F1E8);

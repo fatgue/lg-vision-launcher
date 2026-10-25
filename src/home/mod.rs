@@ -1,6 +1,8 @@
 //! Home screen state, input and drawing (direction A, "Cinematic Ambient").
 mod chrome;
 mod cinematic;
+mod glass;
+mod nav;
 mod overlays;
 
 use chrome::*;
@@ -120,6 +122,9 @@ struct Tile {
     focus: Spring,
     /// Slot position in tile units; animates when tiles are moved or hidden.
     slot: Spring,
+    /// Glass grid position (column, row); animates when apps are moved.
+    gcol: Spring,
+    grow: Spring,
 }
 
 impl Tile {
@@ -135,6 +140,8 @@ impl Tile {
             accent: ACCENT_DEFAULT,
             focus: Spring::new(0.0, 18.0),
             slot: Spring::new(index as f32, 16.0),
+            gcol: Spring::new((index % glass::COLS) as f32, 16.0),
+            grow: Spring::new((index / glass::COLS) as f32, 16.0),
         }
     }
 
@@ -159,15 +166,16 @@ struct Rail {
     scroll: Spring,
     tile_w: f32,
     tile_h: f32,
+    gap: f32,
 }
 
 impl Rail {
     fn new(tile_w: f32, tile_h: f32) -> Self {
-        Self { tiles: Vec::new(), focus: 0, scroll: Spring::new(0.0, 16.0), tile_w, tile_h }
+        Self { tiles: Vec::new(), focus: 0, scroll: Spring::new(0.0, 16.0), tile_w, tile_h, gap: TILE_GAP }
     }
 
     fn slot_x(&self, slot: f32) -> f32 {
-        SAFE_X + slot * (self.tile_w + TILE_GAP)
+        SAFE_X + slot * (self.tile_w + self.gap)
     }
 
     /// Minimal scroll that keeps the focused tile inside the safe area.
@@ -358,6 +366,14 @@ struct Hero {
 
 pub struct Home {
     look: Look,
+    /// Glass: Top Shelf opened (focus in the shelf), its scroll, the Settings tile's focus and
+    /// the backdrop (focused app) with a crossfade from the previous one.
+    shelf: Spring,
+    shelf_scroll: Spring,
+    settings_focus: Spring,
+    backdrop: Option<String>,
+    previous_backdrop: Option<String>,
+    backdrop_t: Spring,
     strings: &'static Strings,
     rails: [Rail; 9],
     active: usize,
@@ -423,8 +439,14 @@ pub struct Home {
 
 impl Home {
     pub fn new(renderer: &Renderer, prefs: Prefs, look: Look) -> Self {
-        Self {
+        let mut home = Self {
             look,
+            shelf: Spring::new(0.0, 14.0),
+            shelf_scroll: Spring::new(0.0, 16.0),
+            settings_focus: Spring::new(0.0, 18.0),
+            backdrop: None,
+            previous_backdrop: None,
+            backdrop_t: Spring::new(1.0, 8.0),
             strings: strings::current(),
             rails: [
                 Rail::new(300.0, 170.0),
@@ -486,6 +508,44 @@ impl Home {
             picture_loaded: [false; crate::installer::MAX_PICTURES],
             pictures_requested: false,
             loaded: false,
+        };
+        home.apply_look();
+        home
+    }
+
+    /// Tile sizes and gaps per look (Cinematic keeps its original values).
+    fn apply_look(&mut self) {
+        let sizes: [(f32, f32, f32); 9] = match self.look {
+            Look::Cinematic => [
+                (300.0, 170.0, TILE_GAP),
+                (300.0, 170.0, TILE_GAP),
+                (300.0, 170.0, TILE_GAP),
+                (300.0, 170.0, TILE_GAP),
+                (300.0, 150.0, TILE_GAP),
+                (300.0, 150.0, TILE_GAP),
+                (300.0, 150.0, TILE_GAP),
+                (300.0, 120.0, TILE_GAP),
+                (300.0, 170.0, TILE_GAP),
+            ],
+            Look::Glass => {
+                let card = (glass::CARD.0, glass::CARD.1, glass::CARD_GAP);
+                [
+                    (glass::TILE.0, glass::TILE.1, glass::GAP),
+                    card,
+                    (glass::TILE.0, glass::TILE.1, glass::ROW_GAP),
+                    card,
+                    card,
+                    card,
+                    (glass::TILE.0, 150.0, glass::ROW_GAP),
+                    (glass::TILE.0, 110.0, glass::ROW_GAP),
+                    (glass::TILE.0, glass::TILE.1, glass::ROW_GAP),
+                ]
+            }
+        };
+        for (rail, (w, h, gap)) in self.rails.iter_mut().zip(sizes) {
+            rail.tile_w = w;
+            rail.tile_h = h;
+            rail.gap = gap;
         }
     }
 
@@ -1249,13 +1309,14 @@ impl Home {
     pub fn key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
         let action = match &self.mode {
             Mode::Menu(_) => self.menu_key(key),
+            Mode::Move { .. } if self.look == Look::Glass => self.glass_move_key(key),
             Mode::Move { .. } => self.move_key(key),
             Mode::Setup { .. } => self.setup_key(key),
             Mode::Offer { .. } => self.offer_key(key),
             Mode::Picker(_) => self.picker_key(key),
             Mode::Settings => self.settings_key(key),
             Mode::Store(_) => self.store_key(key),
-            Mode::Browse if self.header => self.header_key(key),
+            Mode::Browse if self.header && self.look == Look::Cinematic => self.header_key(key),
             Mode::Browse if matches!(key, Key::Digit(_)) || (self.digits.is_some() && key == Key::Ok) => self.digit_key(key),
             Mode::Browse => self.browse_key(key, home_mode),
         };
@@ -1482,7 +1543,8 @@ impl Home {
 
     fn browse_key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
         match self.look {
-            Look::Cinematic | Look::Glass => self.cinematic_browse_key(key, home_mode),
+            Look::Cinematic => self.cinematic_browse_key(key, home_mode),
+            Look::Glass => self.glass_browse_key(key, home_mode),
         }
     }
 
@@ -1787,6 +1849,18 @@ impl Home {
         Some(Action::SavePrefs(self.prefs.clone()))
     }
 
+    /// Where the hold-OK menu opens: the focused tile's x and the y it sits above.
+    fn menu_anchor(&self) -> (f32, f32) {
+        match self.look {
+            Look::Cinematic => {
+                let rail = &self.rails[self.active];
+                let title_y = RAIL_TITLE_Y + self.rail_slot(self.active) as f32 * RAIL_PITCH + self.vscroll.value;
+                (rail.slot_x(rail.focus as f32) - rail.scroll.value, title_y)
+            }
+            Look::Glass => self.glass_menu_anchor(),
+        }
+    }
+
     fn focused(&self) -> Option<&Tile> {
         let rail = &self.rails[self.active];
         rail.tiles.get(rail.focus)
@@ -1815,7 +1889,10 @@ impl Home {
         }
         self.overlay.target = if overlay { 1.0 } else { 0.0 };
         self.lift.target = if moving { 1.0 } else { 0.0 };
-        self.vscroll.target = -(self.rail_slot(active) as f32) * RAIL_PITCH;
+        match self.look {
+            Look::Cinematic => self.vscroll.target = -(self.rail_slot(active) as f32) * RAIL_PITCH,
+            Look::Glass => self.glass_refocus(instant),
+        }
 
         let s = self.strings;
         let next = if self.header {
@@ -1934,6 +2011,9 @@ impl Home {
             }
         }
         moving |= self.vscroll.step(dt);
+        if self.look == Look::Glass {
+            moving |= self.glass_step(dt);
+        }
         moving |= self.hero_t.step(dt);
         moving |= self.overlay.step(dt);
         moving |= self.lift.step(dt);
@@ -1976,7 +2056,12 @@ impl Home {
             for tile in &mut rail.tiles {
                 tile.focus.snap();
                 tile.slot.snap();
+                tile.gcol.snap();
+                tile.grow.snap();
             }
+        }
+        for spring in [&mut self.shelf, &mut self.shelf_scroll, &mut self.settings_focus, &mut self.backdrop_t] {
+            spring.snap();
         }
         self.vscroll.snap();
         self.hero_t.snap();

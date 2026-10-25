@@ -37,7 +37,7 @@ for (const [name, keys] of Object.entries(scenes)) {
   const args = ['--now', '1761400800000', '--fixed-dt', '0.02', '--frames', '240', '--releases', 'http://127.0.0.1:9/none', '--screenshot', path];
   if (keys) args.push('--keys', keys);
   if (look) args.push('--look', look);
-  execFileSync(exe, args, { env: { ...process.env, APPDATA: data, HOME: data }, stdio: 'ignore', cwd: root });
+  execFileSync(exe, args, { env: { ...process.env, APPDATA: data, HOME: data }, stdio: 'ignore', cwd: root, timeout: 60_000 });
   rmSync(data, { recursive: true, force: true });
   if (baseline) {
     const reference = join(baseline, `${name}.png`);
