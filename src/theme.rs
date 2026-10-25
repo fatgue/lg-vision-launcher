@@ -1,5 +1,6 @@
 //! Design tokens for direction A, "Cinematic Ambient".
 use crate::color::Rgba;
+use crate::strings::Strings;
 use crate::text::{Style, Weight};
 
 pub const BG: Rgba = Rgba::hex(0x07080B);
@@ -30,7 +31,38 @@ pub const MONOGRAM: Style = Style::new(Weight::SemiBold, 34.0);
 pub const INPUT_LABEL: Style = Style::new(Weight::SemiBold, 26.0);
 pub const INPUT_SUB: Style = Style::new(Weight::Regular, 20.0);
 pub const NOTICE: Style = Style::new(Weight::Regular, 22.0);
+pub const HINT: Style = Style::new(Weight::Regular, 24.0);
+pub const MENU_TITLE: Style = Style::new(Weight::Medium, 24.0);
+pub const MENU_ITEM: Style = Style::new(Weight::Medium, 28.0);
 
 pub fn hero(size: f32) -> Style {
     Style::new(Weight::SemiBold, size).tracking(-0.02)
+}
+
+/// Glyphs to rasterise at startup, per style: everything the fixed UI draws, plus Latin
+/// text for app titles. Rare sizes and scripts still rasterise lazily.
+pub fn prewarm_jobs(strings: &Strings) -> Vec<(Style, String)> {
+    let latin: String = (' '..='~').chain("\u{e4}\u{f6}\u{fc}\u{c4}\u{d6}\u{dc}\u{df}\u{e9}\u{e8}\u{e1}\u{e0}\u{e7}\u{f1}\u{b7}\u{2013}\u{2014}\u{2019}\u{201c}\u{201d}\u{2026}&".chars()).collect();
+    let ui = format!("{}{}", crate::strings::charset(strings), "0123456789:, ");
+    let upper = latin.to_uppercase() + &ui.to_uppercase();
+    let mut jobs = vec![
+        (BRAND, "Vision".to_string()),
+        (CLOCK, "0123456789:".to_string()),
+        (HEADER, ui.clone()),
+        (EYEBROW, upper),
+        (HERO_SUB, ui.clone()),
+        (HINT, ui.clone()),
+        (RAIL_TITLE, ui.clone()),
+        (INPUT_SUB, ui.clone()),
+        (NOTICE, latin.clone() + &ui),
+        (MENU_ITEM, ui.clone()),
+        (MENU_TITLE, latin.clone()),
+        (TILE_LABEL, latin.clone()),
+        (MONOGRAM, latin.clone()),
+        (INPUT_LABEL, latin.clone()),
+    ];
+    for size in &HERO_SIZES[..2] {
+        jobs.push((hero(*size), latin.clone()));
+    }
+    jobs
 }

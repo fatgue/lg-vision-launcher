@@ -1,8 +1,10 @@
 //! TV services on a worker thread. The UI thread only sends requests and drains updates,
-//! so Luna round trips, file reads and PNG decoding never cost a frame.
+//! so Luna round trips, file I/O and PNG decoding never cost a frame.
 use crate::log::log;
 use crate::model::{Request, Update};
 use crate::sdl::Waker;
+use crate::storage;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 pub const APP_ID: &str = "com.vision.launcher";
@@ -13,13 +15,13 @@ pub struct Platform {
 }
 
 impl Platform {
-    pub fn start(waker: Waker) -> Self {
+    pub fn start(waker: Waker, data_dir: PathBuf) -> Self {
         let (requests, request_rx) = mpsc::channel();
         let (update_tx, updates) = mpsc::channel();
         let sink = Sink { tx: update_tx, waker };
         std::thread::Builder::new()
             .name("platform".into())
-            .spawn(move || backend::run(request_rx, sink))
+            .spawn(move || backend::run(request_rx, sink, data_dir))
             .expect("platform thread");
         Self { requests, updates }
     }
@@ -42,13 +44,19 @@ impl Sink {
     }
 }
 
+fn save_prefs(prefs: &storage::Prefs, data_dir: &std::path::Path) {
+    if let Err(error) = prefs.save(data_dir) {
+        log!("prefs: {error}");
+    }
+}
+
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
 mod backend {
     //! Desktop preview: fixed sample inventory, never touches TV services.
     use super::*;
-    use crate::model::{App, Input};
+    use crate::model::{App, Input, Notice};
 
-    pub fn run(requests: Receiver<Request>, sink: Sink) {
+    pub fn run(requests: Receiver<Request>, sink: Sink, data_dir: PathBuf) {
         for request in requests {
             match request {
                 Request::Refresh => {
@@ -88,8 +96,9 @@ mod backend {
                 }
                 Request::Launch { app_id, .. } => {
                     log!("preview: would launch {app_id}");
-                    sink.send(Update::Notice(format!("Preview: would launch {app_id}")));
+                    sink.send(Update::Notice(Notice::PreviewLaunch(app_id)));
                 }
+                Request::SavePrefs(prefs) => save_prefs(&prefs, &data_dir),
             }
         }
     }
@@ -99,23 +108,27 @@ mod backend {
 mod backend {
     use super::*;
     use crate::luna::Luna;
-    use crate::model::{self, App};
+    use crate::model::{self, App, Notice};
     use base64::Engine;
     use serde_json::{json, Value};
+    use std::collections::HashSet;
+    use std::path::Path;
+    use std::time::Instant;
 
     /// Worker-side state: which icons the UI already holds, and refresh throttling.
     struct State {
-        icons_sent: std::collections::HashSet<String>,
-        last_refresh: Option<std::time::Instant>,
+        data_dir: PathBuf,
+        icons_sent: HashSet<String>,
+        last_refresh: Option<Instant>,
     }
 
-    pub fn run(requests: Receiver<Request>, sink: Sink) {
-        let mut state = State { icons_sent: Default::default(), last_refresh: None };
+    pub fn run(requests: Receiver<Request>, sink: Sink, data_dir: PathBuf) {
+        let mut state = State { data_dir, icons_sent: HashSet::new(), last_refresh: None };
         let mut luna = match Luna::connect() {
             Ok(luna) => luna,
             Err(error) => {
                 log!("luna: {error}");
-                sink.send(Update::Notice("Cannot reach the TV service".into()));
+                sink.send(Update::Notice(Notice::ServiceUnavailable));
                 return;
             }
         };
@@ -127,15 +140,16 @@ mod backend {
                         continue;
                     }
                     refresh(&mut luna, &sink, &mut state);
-                    state.last_refresh = Some(std::time::Instant::now());
+                    state.last_refresh = Some(Instant::now());
                 }
                 Request::Launch { app_id, params } => launch(&mut luna, &sink, &app_id, params),
+                Request::SavePrefs(prefs) => save_prefs(&prefs, &state.data_dir),
             }
         }
     }
 
     /// Reads system inventory directly when this process may, else through Homebrew
-    /// Channel's root `exec` running luna-send (dev apps lack the query ACGs).
+    /// Channel's root `exec` running luna-send.
     fn inventory(luna: &mut Luna, uri: &str) -> Result<Value, String> {
         if let Ok(reply) = luna.call(uri, &json!({})) {
             if reply.get("returnValue").and_then(Value::as_bool) == Some(true) {
@@ -155,12 +169,12 @@ mod backend {
     }
 
     fn refresh(luna: &mut Luna, sink: &Sink, state: &mut State) {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let apps = match inventory(luna, "luna://com.webos.applicationManager/listLaunchPoints") {
             Ok(reply) => model::apps_from_launch_points(&reply, APP_ID),
             Err(error) => {
                 log!("launch points: {error}");
-                sink.send(Update::Notice("App list unavailable".into()));
+                sink.send(Update::Notice(Notice::AppListUnavailable));
                 Vec::new()
             }
         };
@@ -172,22 +186,31 @@ mod backend {
             Err(error) => log!("inputs: {error}"),
         }
         let missing: Vec<App> = apps.into_iter().filter(|app| !state.icons_sent.contains(&app.id)).collect();
-        load_icons(luna, sink, &missing);
+        load_icons(luna, sink, &missing, &state.data_dir);
         state.icons_sent.extend(missing.into_iter().map(|app| app.id));
-        log!("inventory + icons: {} ms", started.elapsed().as_millis());
+        log!("refresh incl. icons: {} ms", started.elapsed().as_millis());
     }
 
-    fn load_icons(luna: &mut Luna, sink: &Sink, apps: &[App]) {
+    /// Disk cache first; then direct reads; whatever the jail hides comes through one root exec.
+    fn load_icons(luna: &mut Luna, sink: &Sink, apps: &[App], data_dir: &Path) {
         let mut blocked = Vec::new();
+        let mut cached = 0;
         for app in apps {
             let Some(path) = &app.icon_path else { continue };
+            if let Some(icon) = crate::storage::load_icon(data_dir, &app.id, path) {
+                sink.send(Update::Icon(icon));
+                cached += 1;
+                continue;
+            }
             match std::fs::read(path) {
-                Ok(bytes) => emit_icon(sink, &app.id, &bytes),
+                Ok(bytes) => emit_icon(sink, &app.id, path, &bytes, data_dir),
                 Err(_) => blocked.push((app.id.clone(), path.clone())),
             }
         }
-        // The native jail hides most app directories; read the rest in root batches.
-        // One root exec costs ~1 s regardless of size, so batch generously.
+        if cached > 0 {
+            log!("icons: {cached} from cache");
+        }
+        // One root exec costs ~1–3 s regardless of size, so batch generously.
         for chunk in blocked.chunks(32) {
             let script: String = chunk
                 .iter()
@@ -195,18 +218,23 @@ mod backend {
                 .collect();
             let Ok(stdout) = exec(luna, &script) else { continue };
             let mut blocks = stdout.split("@@").skip(1);
-            for (app_id, _) in chunk {
+            for (app_id, path) in chunk {
                 let Some(block) = blocks.next() else { break };
                 if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(block.trim()) {
-                    emit_icon(sink, app_id, &bytes);
+                    emit_icon(sink, app_id, path, &bytes, data_dir);
                 }
             }
         }
     }
 
-    fn emit_icon(sink: &Sink, app_id: &str, bytes: &[u8]) {
+    fn emit_icon(sink: &Sink, app_id: &str, source: &str, bytes: &[u8], data_dir: &Path) {
         match model::decode_icon(app_id, bytes) {
-            Ok(icon) => sink.send(Update::Icon(icon)),
+            Ok(icon) => {
+                if let Err(error) = crate::storage::save_icon(data_dir, &icon, source) {
+                    log!("icon cache {app_id}: {error}");
+                }
+                sink.send(Update::Icon(icon));
+            }
             Err(error) => log!("icon {app_id}: {error}"),
         }
     }
@@ -225,7 +253,7 @@ mod backend {
         let quoted = payload.to_string().replace('\'', "");
         if let Err(error) = exec(luna, &format!("luna-send -n 1 {uri} '{quoted}'")) {
             log!("launch {app_id} via hbchannel: {error}");
-            sink.send(Update::Notice("Could not launch the app".into()));
+            sink.send(Update::Notice(Notice::LaunchFailed));
         }
     }
 }

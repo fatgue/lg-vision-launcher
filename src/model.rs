@@ -27,16 +27,25 @@ pub struct Icon {
     pub color: Option<[u8; 3]>,
 }
 
+/// Messages for the user; the UI picks the localised text.
+pub enum Notice {
+    ServiceUnavailable,
+    AppListUnavailable,
+    LaunchFailed,
+    PreviewLaunch(String),
+}
+
 pub enum Update {
     Apps(Vec<App>),
     Inputs(Vec<Input>),
     Icon(Icon),
-    Notice(String),
+    Notice(Notice),
 }
 
 pub enum Request {
     Refresh,
     Launch { app_id: String, params: Option<Value> },
+    SavePrefs(crate::storage::Prefs),
 }
 
 /// Normalises `listLaunchPoints` (LG's Home bar, already in the user's order).

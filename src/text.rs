@@ -1,14 +1,19 @@
-//! Bitmap text at exact pixel sizes from a shared A8 glyph atlas. Glyphs rasterise once on
-//! first use (fontdue) and upload as a tiny sub-image; steady-state frames do no font work.
+//! Bitmap text at exact pixel sizes from a shared A8 glyph atlas.
+//!
+//! Startup: fonts load and every glyph the fixed UI styles need is rasterised on a background
+//! thread while the main thread brings up SDL/GL; the atlas then fills with one upload. Later
+//! glyphs (app titles in odd scripts, rare sizes) rasterise lazily as tiny sub-image uploads.
 use crate::color::Rgba;
 use crate::gl;
 use crate::render::{Rect, Renderer, Texture};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::PathBuf;
+use std::thread::JoinHandle;
 
 const ATLAS_W: i32 = 2048;
-const ATLAS_H: i32 = 1024;
+const ATLAS_H: i32 = 2048;
 const PAD: i32 = 1;
+const FONT_FILES: [&str; 3] = ["Outfit-Regular.ttf", "Outfit-Medium.ttf", "Outfit-SemiBold.ttf"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Weight {
@@ -42,6 +47,12 @@ struct Key {
     ch: char,
 }
 
+impl Key {
+    fn new(style: Style, ch: char) -> Self {
+        Self { weight: style.weight, size: style.size.round() as u16, ch }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Glyph {
     uv: [f32; 4],
@@ -50,6 +61,48 @@ struct Glyph {
     xmin: f32,
     ymin: f32,
     advance: f32,
+}
+
+struct Raster {
+    key: Key,
+    metrics: fontdue::Metrics,
+    bitmap: Vec<u8>,
+}
+
+/// Fonts plus pre-rasterised glyphs, produced off the main thread.
+pub struct Prewarmed {
+    fonts: Vec<fontdue::Font>,
+    rasters: Vec<Raster>,
+}
+
+/// Loads the fonts and rasterises `jobs` (style + the characters it will draw) on a thread.
+pub fn prewarm(fonts_dir: PathBuf, jobs: Vec<(Style, String)>) -> JoinHandle<Result<Prewarmed, String>> {
+    std::thread::Builder::new()
+        .name("glyphs".into())
+        .spawn(move || {
+            let fonts = FONT_FILES
+                .iter()
+                .map(|file| {
+                    let bytes = std::fs::read(fonts_dir.join(file)).map_err(|e| format!("{file}: {e}"))?;
+                    fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).map_err(|e| format!("{file}: {e}"))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let mut seen = std::collections::HashSet::new();
+            let mut rasters = Vec::new();
+            for (style, chars) in jobs {
+                for ch in chars.chars() {
+                    let key = Key::new(style, ch);
+                    if seen.insert(key) {
+                        let (metrics, bitmap) = fonts[key.weight as usize].rasterize(ch, key.size as f32);
+                        rasters.push(Raster { key, metrics, bitmap });
+                    }
+                }
+            }
+            // Tallest first packs shelves tightly.
+            rasters.sort_by_key(|r| std::cmp::Reverse(r.metrics.height));
+            Ok(Prewarmed { fonts, rasters })
+        })
+        .expect("glyph thread")
 }
 
 pub struct Text {
@@ -62,46 +115,54 @@ pub struct Text {
 }
 
 impl Text {
-    pub fn new(renderer: &Renderer, fonts_dir: &Path) -> Result<Self, String> {
-        let load = |file: &str| -> Result<fontdue::Font, String> {
-            let bytes = std::fs::read(fonts_dir.join(file)).map_err(|e| format!("{file}: {e}"))?;
-            fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).map_err(|e| format!("{file}: {e}"))
-        };
-        Ok(Self {
-            fonts: vec![load("Outfit-Regular.ttf")?, load("Outfit-Medium.ttf")?, load("Outfit-SemiBold.ttf")?],
+    pub fn new(renderer: &Renderer, prewarmed: Prewarmed) -> Self {
+        let mut text = Self {
+            fonts: prewarmed.fonts,
             atlas: renderer.create_texture(ATLAS_W, ATLAS_H, gl::ALPHA),
-            cache: HashMap::with_capacity(512),
+            cache: HashMap::with_capacity(prewarmed.rasters.len() + 256),
             cursor: (PAD, PAD),
             row_h: 0,
             rasterised: 0,
-        })
+        };
+        // Pack everything into a CPU copy, then upload the used rows once.
+        let mut pixels = vec![0u8; (ATLAS_W * ATLAS_H) as usize];
+        for raster in &prewarmed.rasters {
+            let Some((x, y)) = text.allocate(raster.metrics.width as i32, raster.metrics.height as i32) else {
+                break;
+            };
+            for row in 0..raster.metrics.height {
+                let src = &raster.bitmap[row * raster.metrics.width..][..raster.metrics.width];
+                let dst = ((y as usize + row) * ATLAS_W as usize) + x as usize;
+                pixels[dst..dst + raster.metrics.width].copy_from_slice(src);
+            }
+            text.insert(raster.key, &raster.metrics, x, y);
+        }
+        let used = (text.cursor.1 + text.row_h + PAD).min(ATLAS_H);
+        renderer.upload(text.atlas, 0, 0, ATLAS_W, used, gl::ALPHA, &pixels[..(ATLAS_W * used) as usize]);
+        text
     }
 
-    fn glyph(&mut self, renderer: &Renderer, key: Key) -> Glyph {
-        if let Some(glyph) = self.cache.get(&key) {
-            return *glyph;
-        }
-        let font = &self.fonts[key.weight as usize];
-        let (metrics, bitmap) = font.rasterize(key.ch, key.size as f32);
-        let (w, h) = (metrics.width as i32, metrics.height as i32);
+    pub fn glyph_count(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Shelf allocation; None when the atlas is full.
+    fn allocate(&mut self, w: i32, h: i32) -> Option<(i32, i32)> {
         if self.cursor.0 + w + PAD > ATLAS_W {
             self.cursor = (PAD, self.cursor.1 + self.row_h + PAD);
             self.row_h = 0;
         }
         if self.cursor.1 + h + PAD > ATLAS_H {
-            // Full: start over. Glyphs re-rasterise lazily; queued quads this frame may
-            // briefly show a wrong glyph, which the next frame corrects.
-            self.cache.clear();
-            self.cursor = (PAD, PAD);
-            self.row_h = 0;
+            return None;
         }
-        let (x, y) = self.cursor;
-        if w > 0 && h > 0 {
-            renderer.upload(self.atlas, x, y, w, h, gl::ALPHA, &bitmap);
-        }
+        let position = self.cursor;
         self.cursor.0 += w + PAD;
         self.row_h = self.row_h.max(h);
-        self.rasterised += 1;
+        Some(position)
+    }
+
+    fn insert(&mut self, key: Key, metrics: &fontdue::Metrics, x: i32, y: i32) -> Glyph {
+        let (w, h) = (metrics.width as i32, metrics.height as i32);
         let glyph = Glyph {
             uv: [
                 x as f32 / ATLAS_W as f32,
@@ -119,19 +180,39 @@ impl Text {
         glyph
     }
 
-    fn key(style: Style, ch: char) -> Key {
-        Key { weight: style.weight, size: style.size.round() as u16, ch }
+    fn glyph(&mut self, renderer: &Renderer, key: Key) -> Glyph {
+        if let Some(glyph) = self.cache.get(&key) {
+            return *glyph;
+        }
+        let (metrics, bitmap) = self.fonts[key.weight as usize].rasterize(key.ch, key.size as f32);
+        let (w, h) = (metrics.width as i32, metrics.height as i32);
+        let (x, y) = match self.allocate(w, h) {
+            Some(position) => position,
+            None => {
+                // Full: start over. Glyphs re-rasterise lazily; quads queued this frame may
+                // briefly show a wrong glyph, which the next frame corrects.
+                self.cache.clear();
+                self.cursor = (PAD, PAD);
+                self.row_h = 0;
+                self.allocate(w, h).unwrap_or((PAD, PAD))
+            }
+        };
+        if w > 0 && h > 0 {
+            renderer.upload(self.atlas, x, y, w, h, gl::ALPHA, &bitmap);
+        }
+        self.rasterised += 1;
+        self.insert(key, &metrics, x, y)
     }
 
     pub fn measure(&mut self, renderer: &Renderer, text: &str, style: Style) -> f32 {
+        let size = style.size.round();
         let mut width = 0.0;
         let mut previous = None;
-        let size = style.size.round();
         for ch in text.chars() {
             if let Some(prev) = previous {
                 width += self.fonts[style.weight as usize].horizontal_kern(prev, ch, size).unwrap_or(0.0);
             }
-            width += self.glyph(renderer, Self::key(style, ch)).advance + style.tracking * size;
+            width += self.glyph(renderer, Key::new(style, ch)).advance + style.tracking * size;
             previous = Some(ch);
         }
         width - if previous.is_some() { style.tracking * size } else { 0.0 }
@@ -153,7 +234,7 @@ impl Text {
             if let Some(prev) = previous {
                 pen += self.fonts[style.weight as usize].horizontal_kern(prev, ch, size).unwrap_or(0.0);
             }
-            let glyph = self.glyph(renderer, Self::key(style, ch));
+            let glyph = self.glyph(renderer, Key::new(style, ch));
             if glyph.w > 0.0 {
                 let gx = (pen + glyph.xmin).round();
                 let gy = (y - glyph.ymin - glyph.h).round();

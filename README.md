@@ -7,8 +7,9 @@ Rust + SDL2 + a custom OpenGL ES 2 renderer. Design: direction A, "Cinematic Amb
 
 | Metric | Value |
 |---|---|
-| Cold start to first frame | ~410 ms |
+| Cold start to first frame | ~380 ms |
 | App list (Luna, direct) | ~7 ms |
+| Icons on later starts (disk cache) | ~24 ms, ready before the first frame |
 | CPU work per frame while navigating | ~1 ms (max ~4 ms) |
 | Frame rate | 50 fps (the TV's UI refresh), steady |
 | GPU when idle | 0 % (draws only when something changes) |
@@ -19,7 +20,8 @@ Rust + SDL2 + a custom OpenGL ES 2 renderer. Design: direction A, "Cinematic Amb
 - **Render on demand:** the UI thread sleeps in `SDL_WaitEventTimeout` until a key, new data, the next minute (clock) or a running animation wakes it.
 - **One shader for everything:** rounded rects, soft shadows, glows, ambient light and strokes are analytic SDFs in the fragment shader. No offscreen passes, no real-time blur.
 - **Batched drawing:** one streamed vertex buffer; textures only switch between atlases (shapes → icons → glyphs).
-- **Bitmap glyph atlas:** each glyph is rasterised once per size (fontdue) and uploaded as a tiny sub-image.
+- **Glyphs prewarmed off the main thread:** fonts load and every glyph the UI needs (~1,200) rasterises on a background thread while SDL/GL start; the atlas fills with a single upload. Nothing rasterises during navigation.
+- **Icon disk cache:** decoded icons (RGBA, ≤128 px, dominant colour) live in the data directory, so the slow Homebrew root path is only needed for apps installed since the last start.
 - **Nothing blocks the UI thread:** Luna calls, file reads and PNG decoding run on the platform worker.
 - **Nothing is linked at build time:** SDL, GLES, libluna-service2 and GLib are loaded with `dlopen`, so the project cross-compiles without a TV sysroot.
 
@@ -35,7 +37,18 @@ src/anim.rs      critically damped springs
 src/platform.rs  worker: desktop sample data or TV services
 src/luna.rs      Luna client (libluna-service2 + GLib, ARM only)
 src/model.rs     apps, inputs, icon decoding and colour analysis
+src/storage.rs   preferences and icon cache (outside the app payload)
+src/strings.rs   all user-visible text (English base, more locales later)
 ```
+
+Persistent data lives in `/media/developer/vision` on the TV (survives reinstalls):
+`prefs.json` (favourites order, hidden apps) and `icons/` (decoded icon cache).
+
+## Using it
+
+- **Left / Right / Up / Down** move the focus; **OK** opens the app or input.
+- **Hold OK** on a favourite opens a menu: **Move** (Left / Right, OK to finish, Back to cancel) or **Hide**.
+- Hidden apps appear in their own row at the bottom; **hold OK** there to show them again.
 
 ## Development
 
@@ -60,9 +73,12 @@ TV access via `VISION_TV_HOST` / `VISION_TV_PASSWORD` (defaults: `192.168.178.96
 
 ## Status
 
-Phase 1 (scaffold) is done: the real app list with icons in LG's order, HDMI inputs, ambient colour taken from the focused icon, launching via Luna. Vision runs as a dev app and does not take over the Home key yet.
+- Phase 1 (scaffold) is done: the real app list with icons in LG's order, HDMI inputs, ambient colour taken from the focused icon, launching via Luna.
+- Phase 2 is done: glyph prewarming, the icon disk cache, the favourites editor (move / hide / show) with persistence, and centralised strings ready for localisation.
 
-Next: on-disk icon cache (avoids the ~3 s Homebrew service cold start), favourites editor, weather, Home Assistant, Plex "Continue watching", TiviOne (opt-in), then the Home takeover.
+Vision runs as a dev app and does not take over the Home key yet.
+
+Next: weather, Home Assistant, Plex "Continue watching", TiviOne (opt-in), localisation (5 languages), then the Home takeover.
 
 ## Third-party licences
 

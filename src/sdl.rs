@@ -36,6 +36,7 @@ pub const APP_DIDENTERBACKGROUND: u32 = 0x104;
 pub const APP_DIDENTERFOREGROUND: u32 = 0x106;
 pub const WINDOWEVENT: u32 = 0x200;
 pub const KEYDOWN: u32 = 0x300;
+pub const KEYUP: u32 = 0x301;
 pub const USEREVENT: u32 = 0x8000;
 
 // SDL_WindowEventID

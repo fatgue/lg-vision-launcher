@@ -15,6 +15,9 @@ mod model;
 mod platform;
 mod render;
 mod sdl;
+#[cfg_attr(not(all(target_os = "linux", target_arch = "arm")), allow(dead_code))]
+mod storage;
+mod strings;
 mod text;
 mod theme;
 
@@ -85,6 +88,10 @@ fn run(started: Instant) -> Result<(), String> {
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_default();
     let assets = find_assets(&exe_dir)?;
+    // Fonts load and UI glyphs rasterise in parallel with SDL/GL bring-up.
+    let glyphs = text::prewarm(assets.join("fonts"), theme::prewarm_jobs(strings::current()));
+    let data_dir = storage::data_dir(WEBOS);
+    let prefs = storage::Prefs::load(&data_dir);
 
     if WEBOS {
         // SDL-webOS reads APPID for its shell surface and WMCLASS from the environment.
@@ -116,9 +123,12 @@ fn run(started: Instant) -> Result<(), String> {
         gl.string(gl::VERSION)
     );
     let mut renderer = Renderer::new(gl, es)?;
-    let mut text = Text::new(&renderer, &assets.join("fonts"))?;
-    let mut home = Home::new(&renderer);
-    let platform = Platform::start(sdl.waker());
+    let glyph_wait = Instant::now();
+    let prewarmed = glyphs.join().map_err(|_| "glyph thread panicked".to_string())??;
+    let mut text = Text::new(&renderer, prewarmed);
+    log!("glyphs: {} prewarmed, waited {} ms", text.glyph_count(), glyph_wait.elapsed().as_millis());
+    let mut home = Home::new(&renderer, prefs);
+    let platform = Platform::start(sdl.waker(), data_dir);
     platform.send(Request::Refresh);
     log!("init: {} ms", started.elapsed().as_millis());
 
@@ -130,11 +140,19 @@ fn run(started: Instant) -> Result<(), String> {
     let mut first_frame = true;
     let mut frames = 0u32;
     let mut event = Event::zeroed();
+    // OK fires on release; held past LONG_PRESS_MS it becomes LongOk instead.
+    const LONG_PRESS_MS: u128 = 550;
+    let mut ok_down: Option<Instant> = None;
+    let mut long_fired = false;
 
     'main: loop {
         // Sleep until input, worker data or the next minute while nothing animates.
         // --frames is a benchmark: render continuously so timings cover every frame.
-        let timeout = if animating || dirty || options.frames.is_some() { 0 } else { ms_to_next_minute() };
+        let mut timeout = if animating || dirty || options.frames.is_some() { 0 } else { ms_to_next_minute() };
+        if let (Some(down), false) = (ok_down, long_fired) {
+            let left = LONG_PRESS_MS.saturating_sub(down.elapsed().as_millis()) as c_int;
+            timeout = timeout.min(left.max(1));
+        }
         let mut got = if timeout == 0 {
             unsafe { (sdl.poll_event)(&mut event) }
         } else {
@@ -143,19 +161,26 @@ fn run(started: Instant) -> Result<(), String> {
         while got != 0 {
             match event.kind() {
                 sdl::QUIT | sdl::APP_TERMINATING => break 'main,
-                sdl::KEYDOWN => {
-                    if let Some(key) = map_key(event.key_sym()) {
-                        match home.key(key, false) {
-                            Some(Action::Launch { app_id, params }) => {
-                                log!("launch {app_id}");
-                                platform.send(Request::Launch { app_id, params });
-                            }
-                            Some(Action::Exit) => break 'main,
-                            None => {}
+                sdl::KEYDOWN => match map_key(event.key_sym()) {
+                    Some(Key::Ok) => {
+                        if !event.key_repeat() && ok_down.is_none() {
+                            ok_down = Some(Instant::now());
+                            long_fired = false;
+                        }
+                    }
+                    Some(key) => {
+                        if apply(&mut home, &platform, key) {
+                            break 'main;
                         }
                         dirty = true;
                     }
-                    let _ = event.key_repeat();
+                    None => {}
+                },
+                sdl::KEYUP if map_key(event.key_sym()) == Some(Key::Ok) => {
+                    if ok_down.take().is_some() && !long_fired && apply(&mut home, &platform, Key::Ok) {
+                        break 'main;
+                    }
+                    dirty = true;
                 }
                 sdl::WINDOWEVENT => match event.window_event() {
                     sdl::WINDOWEVENT_SHOWN
@@ -175,11 +200,18 @@ fn run(started: Instant) -> Result<(), String> {
             }
             got = unsafe { (sdl.poll_event)(&mut event) };
         }
+        if let (Some(down), false) = (ok_down, long_fired) {
+            if down.elapsed().as_millis() >= LONG_PRESS_MS {
+                long_fired = true;
+                apply(&mut home, &platform, Key::LongOk);
+                dirty = true;
+            }
+        }
         while let Ok(update) = platform.updates.try_recv() {
             match update {
                 Update::Apps(apps) => home.set_apps(apps),
                 Update::Inputs(inputs) => home.set_inputs(inputs),
-                Update::Icon(icon) => home.add_icon(icon, Some(&renderer)),
+                Update::Icon(icon) => home.add_icon(icon, &renderer),
                 Update::Notice(message) => home.notice(message),
             }
             dirty = true;
@@ -193,7 +225,7 @@ fn run(started: Instant) -> Result<(), String> {
         // Scripted keys (previews/benchmarks): one every 12 frames once data has arrived.
         if home.loaded && frames >= 20 && frames % 12 == 0 {
             if let Some(key) = options.keys.get(((frames - 20) / 12) as usize) {
-                let _ = home.key(*key, true);
+                apply(&mut home, &platform, *key);
                 dirty = true;
             }
         }
@@ -204,7 +236,6 @@ fn run(started: Instant) -> Result<(), String> {
         let frame_start = Instant::now();
         let dt = frame_start.duration_since(last_frame).as_secs_f32().min(0.05);
         last_frame = frame_start;
-        home.flush_pending_icons(&renderer);
         animating = home.update(dt);
         dirty = false;
 
@@ -214,7 +245,7 @@ fn run(started: Instant) -> Result<(), String> {
         renderer.begin((w, h), theme::BG);
         let began = Instant::now();
         let clock = format!("{:02}:{:02}", now.hour(), now.minute());
-        home.draw(&mut renderer, &mut text, &clock, &format_date(&now));
+        home.draw(&mut renderer, &mut text, &clock, &format_date(&now, strings::current()));
         renderer.end();
         let submitted = Instant::now();
         let last = options.frames.is_some_and(|n| frames + 1 >= n);
@@ -245,6 +276,20 @@ fn run(started: Instant) -> Result<(), String> {
         (sdl.quit)();
     }
     Ok(())
+}
+
+/// Feeds a key to the home screen and dispatches the resulting action. Returns true to quit.
+fn apply(home: &mut Home, platform: &Platform, key: Key) -> bool {
+    match home.key(key, false) {
+        Some(Action::Launch { app_id, params }) => {
+            log!("launch {app_id}");
+            platform.send(Request::Launch { app_id, params });
+        }
+        Some(Action::SavePrefs(prefs)) => platform.send(Request::SavePrefs(prefs)),
+        Some(Action::Exit) => return true,
+        None => {}
+    }
+    false
 }
 
 fn create_window(sdl: &Sdl) -> Result<(sdl::Window, sdl::GlContext, bool), String> {
@@ -334,6 +379,7 @@ fn parse_key(name: &str) -> Option<Key> {
         "down" => Key::Down,
         "ok" => Key::Ok,
         "back" => Key::Back,
+        "hold" => Key::LongOk,
         _ => return None,
     })
 }
@@ -344,16 +390,12 @@ fn ms_to_next_minute() -> c_int {
     ms.clamp(50, 60_000) as c_int
 }
 
-fn format_date(now: &chrono::DateTime<chrono::Local>) -> String {
-    const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-    const MONTHS: [&str; 12] = [
-        "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December",
-    ];
+fn format_date(now: &chrono::DateTime<chrono::Local>, s: &strings::Strings) -> String {
     format!(
         "{}, {} {}",
-        DAYS[now.weekday().num_days_from_monday() as usize],
+        s.days[now.weekday().num_days_from_monday() as usize],
         now.day(),
-        MONTHS[now.month0() as usize]
+        s.months[now.month0() as usize]
     )
 }
 
