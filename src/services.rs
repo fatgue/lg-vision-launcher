@@ -67,7 +67,7 @@ struct Worker {
     next_ha: Instant,
     next_plex: Instant,
     pin: Option<Pin>,
-    companion: Option<Companion>,
+    companion: Option<(Companion, String)>,
     media_art: HashSet<String>,
     next_tv: Instant,
     tv_seen: Option<std::time::SystemTime>,
@@ -82,6 +82,7 @@ impl Worker {
             ha_selected: config.ha_entities.len(),
             plex: config.plex_token.as_ref().map(|_| config.plex_user.clone().unwrap_or_else(|| "Plex".into())),
             tivione: config.tivione,
+            location: config.location_name.clone().filter(|_| config.location.is_some()),
             ..Status::default()
         };
         Self {
@@ -174,20 +175,54 @@ impl Worker {
                 self.ha_action(&entity);
                 self.next_ha = now + Duration::from_millis(400);
             }
-            ServiceRequest::HaSetup(true) => self.start_companion(),
-            ServiceRequest::HaSetup(false) => {
-                self.companion = None;
-                self.status.ha_setup = None;
+            ServiceRequest::HaSetup(true) => {
+                self.status.ha_setup = self.companion_url("/");
                 self.publish_status();
+            }
+            ServiceRequest::HaSetup(false) => {
+                self.status.ha_setup = None;
+                self.stop_companion_if_idle();
+                self.publish_status();
+            }
+            ServiceRequest::LocationSetup(true) => {
+                self.status.location_setup = self.companion_url("/location");
+                self.publish_status();
+            }
+            ServiceRequest::LocationSetup(false) => {
+                self.status.location_setup = None;
+                self.stop_companion_if_idle();
+                self.publish_status();
+            }
+            ServiceRequest::LocationSet { name, lat, lon } => {
+                log!("weather: location {name}");
+                self.config.location = Some((lat, lon));
+                self.config.location_name = Some(name.clone());
+                self.save();
+                self.status.location = Some(name);
+                self.status.location_setup = None;
+                self.stop_companion_if_idle();
+                self.publish_status();
+                self.next_weather = now;
+            }
+            ServiceRequest::LocationClear => {
+                self.config.location = None;
+                self.config.location_name = None;
+                self.save();
+                self.status.location = None;
+                self.publish_status();
+                self.next_weather = now;
+                if self.ha_location.is_none() && self.config.ha().is_none() {
+                    self.sink.send(Update::Weather(None));
+                }
             }
             ServiceRequest::HaConfigured { url, token } => {
                 log!("home assistant: connected to {url}");
                 self.config.ha_url = Some(url.clone());
                 self.config.ha_token = Some(token);
                 self.save();
-                self.companion = None;
                 self.status.ha = Some(url);
                 self.status.ha_setup = None;
+                self.stop_companion_if_idle();
                 self.status.ha_error = None;
                 self.publish_status();
                 self.ha_location = None;
@@ -410,21 +445,29 @@ impl Worker {
         }
     }
 
-    fn start_companion(&mut self) {
-        let key = format!("{:06}", u64::from_str_radix(&crate::config::random_id()[..8], 16).unwrap_or(0) % 1_000_000);
-        match companion::start(key.clone(), self.requests.clone()) {
-            Ok(server) => {
-                self.companion = Some(server);
-                let ip = net::local_ip().unwrap_or_else(|| "tv".into());
-                self.status.ha_setup = Some(format!("http://{ip}:{}/?k={key}", companion::PORT));
-                self.status.ha_error = None;
-            }
-            Err(error) => {
-                log!("companion: {error}");
-                self.status.ha_error = Some("Setup page could not start".into());
+    /// The phone page address for `path`, starting the companion server when needed. One
+    /// server and key serve both setup pages.
+    fn companion_url(&mut self, path: &str) -> Option<String> {
+        if self.companion.is_none() {
+            let key = format!("{:06}", u64::from_str_radix(&crate::config::random_id()[..8], 16).unwrap_or(0) % 1_000_000);
+            match companion::start(key.clone(), self.requests.clone()) {
+                Ok(server) => self.companion = Some((server, key)),
+                Err(error) => {
+                    log!("companion: {error}");
+                    self.status.ha_error = Some("Setup page could not start".into());
+                    return None;
+                }
             }
         }
-        self.publish_status();
+        let key = &self.companion.as_ref()?.1;
+        let ip = net::local_ip().unwrap_or_else(|| "tv".into());
+        Some(format!("http://{ip}:{}{path}?k={key}", companion::PORT))
+    }
+
+    fn stop_companion_if_idle(&mut self) {
+        if self.status.ha_setup.is_none() && self.status.location_setup.is_none() {
+            self.companion = None;
+        }
     }
 
     // ---- Plex -----------------------------------------------------------------------

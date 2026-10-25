@@ -37,6 +37,8 @@ pub enum Action {
     Launch { app_id: String, params: Option<Value> },
     SavePrefs(Prefs),
     Service(ServiceRequest),
+    HomeTakeover(bool),
+    RefreshImages,
     Exit,
 }
 
@@ -59,6 +61,7 @@ enum Service {
     Plex,
     TiviOne,
     HomeTiles,
+    Weather,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -234,6 +237,40 @@ impl Picker {
     }
 }
 
+/// Rows the user can switch off, with the rails they cover.
+const ROW_KEYS: [(&str, &[usize]); 5] = [
+    ("continue", &[CONTINUE]),
+    ("tv", &[TV_RECENT, TV_FAVORITES, TV_COMING]),
+    ("home", &[HOME]),
+    ("inputs", &[INPUTS]),
+    ("hidden", &[HIDDEN]),
+];
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SettingId {
+    Service(Service),
+    WeatherShow,
+    Location,
+    Units,
+    Clock24,
+    ShowDate,
+    HomeTakeover,
+    Row(usize),
+    Ambient,
+    Motion,
+    RefreshImages,
+    Info,
+}
+
+struct SettingItem {
+    id: SettingId,
+    label: String,
+    value: String,
+    /// Switch state for on/off settings.
+    on: Option<bool>,
+    enabled: bool,
+}
+
 /// Something the Magic Remote pointer can hit, recorded while drawing.
 #[derive(Clone, Copy, PartialEq)]
 enum Target {
@@ -244,6 +281,7 @@ enum Target {
     PickerCategory(usize),
     PickerRow(usize),
     Gear,
+    SettingsSection(usize),
     SettingsRow(usize),
 }
 
@@ -289,7 +327,12 @@ pub struct Home {
     hits: RefCell<Vec<(Rect, Target)>>,
     /// Settings rows (connections, Home tiles, TiviOne), built from the service status.
     settings: Vec<Tile>,
+    settings_section: usize,
+    settings_column: usize,
     settings_row: usize,
+    /// This process runs as LG's Home (Vision is the Home launcher).
+    home_mode: bool,
+    ip: Option<String>,
     /// The gear in the header has focus.
     header: bool,
     /// A setup panel or the picker was opened from Settings: Back returns there.
@@ -341,7 +384,11 @@ impl Home {
             notice: None,
             hits: RefCell::new(Vec::new()),
             settings: Vec::new(),
+            settings_section: 0,
+            settings_column: 0,
             settings_row: 0,
+            home_mode: false,
+            ip: None,
             header: false,
             from_settings: false,
             loaded: false,
@@ -365,7 +412,21 @@ impl Home {
         let Some(target) = self.hit(x, y) else { return false };
         let changed = match (target, &mut self.mode) {
             (Target::Gear, Mode::Browse) => !std::mem::replace(&mut self.header, true),
-            (Target::SettingsRow(i), Mode::Settings) => std::mem::replace(&mut self.settings_row, i) != i,
+            (Target::SettingsSection(i), Mode::Settings) => {
+                let changed = self.settings_section != i || self.settings_column != 0;
+                if self.settings_section != i {
+                    self.settings_row = 0;
+                }
+                self.settings_section = i;
+                self.settings_column = 0;
+                changed
+            }
+            (Target::SettingsRow(i), Mode::Settings) => {
+                let changed = self.settings_row != i || self.settings_column != 1;
+                self.settings_row = i;
+                self.settings_column = 1;
+                changed
+            }
             (Target::Tile { rail, index }, Mode::Browse) => {
                 let changed = self.active != rail || self.rails[rail].focus != index || self.header;
                 self.header = false;
@@ -584,6 +645,7 @@ impl Home {
             let now_connected = match service {
                 Service::HomeAssistant => status.ha.is_some() && self.status.ha.is_none(),
                 Service::Plex => status.plex.is_some() && self.status.plex.is_none(),
+                Service::Weather => status.location.is_some() && status.location != self.status.location,
                 Service::TiviOne | Service::HomeTiles => false,
             };
             if now_connected {
@@ -593,10 +655,10 @@ impl Home {
         self.qr = status
             .ha_setup
             .as_ref()
+            .or(status.location_setup.as_ref())
             .and_then(|url| qrcodegen::QrCode::encode_text(url, qrcodegen::QrCodeEcc::Medium).ok().map(|qr| (url.clone(), qr)));
         self.status = status;
         self.settings = tiles;
-        self.settings_row = self.settings_row.min(self.settings.len().saturating_sub(1));
         self.maybe_offer();
         self.refocus(false);
     }
@@ -776,7 +838,16 @@ impl Home {
     }
 
     fn has(&self, rail: usize) -> bool {
-        self.rails.get(rail).is_some_and(|r| !r.tiles.is_empty())
+        self.rails.get(rail).is_some_and(|r| !r.tiles.is_empty()) && !self.row_off(rail)
+    }
+
+    /// Whether the user switched this rail's row off in Settings.
+    fn row_off(&self, rail: usize) -> bool {
+        ROW_KEYS.iter().any(|(key, rails)| rails.contains(&rail) && self.prefs.ui.hidden_rows.iter().any(|h| h == key))
+    }
+
+    pub fn set_home_mode(&mut self, home_mode: bool) {
+        self.home_mode = home_mode;
     }
 
     /// Vertical slot of a rail among the non-empty ones.
@@ -814,28 +885,163 @@ impl Home {
     fn header_key(&mut self, key: Key) -> Option<Action> {
         match key {
             Key::Down | Key::Back => self.header = false,
-            Key::Ok => self.mode = Mode::Settings,
+            Key::Ok => {
+                self.mode = Mode::Settings;
+                self.settings_column = 0;
+                self.ip = crate::net::local_ip();
+            }
             _ => {}
         }
         None
     }
 
+    /// Everything the Settings panel lists, by section.
+    fn settings_sections(&self) -> Vec<(&'static str, Vec<SettingItem>)> {
+        let s = self.strings;
+        let ui = &self.prefs.ui;
+        let onoff = |v: bool| if v { s.on } else { s.off }.to_string();
+        let item = |id, label: &str, value: String, on: Option<bool>| SettingItem { id, label: label.to_string(), value, on, enabled: true };
+        let connections = self
+            .settings
+            .iter()
+            .filter_map(|tile| match tile.kind {
+                Kind::Setting { service, connected } => Some(item(SettingId::Service(service), &tile.title, tile.detail.clone(), (service == Service::TiviOne).then_some(connected))),
+                _ => None,
+            })
+            .collect();
+        let location = match (&self.status.location, &self.status.ha) {
+            (Some(name), _) => name.clone(),
+            (None, Some(_)) => s.from_home_assistant.to_string(),
+            (None, None) => s.not_set.to_string(),
+        };
+        let weather = vec![
+            item(SettingId::WeatherShow, s.show_weather, onoff(ui.weather), Some(ui.weather)),
+            item(SettingId::Location, s.location, location, None),
+            item(SettingId::Units, s.units, if ui.fahrenheit { s.fahrenheit } else { s.celsius }.to_string(), None),
+        ];
+        let clock = vec![
+            item(SettingId::Clock24, s.time_format, if ui.clock24 { s.hours24 } else { s.hours12 }.to_string(), None),
+            item(SettingId::ShowDate, s.show_date, onoff(ui.show_date), Some(ui.show_date)),
+        ];
+        let home = vec![item(SettingId::HomeTakeover, s.vision_as_home, onoff(self.home_mode), Some(self.home_mode))];
+        let rows = ROW_KEYS
+            .iter()
+            .enumerate()
+            .map(|(i, (key, _))| {
+                let label = [s.continue_watching, s.live_tv, s.home, s.inputs, s.hidden][i];
+                let shown = !ui.hidden_rows.iter().any(|h| h == key);
+                item(SettingId::Row(i), label, if shown { s.shown } else { s.row_hidden }.to_string(), Some(shown))
+            })
+            .collect();
+        let appearance = vec![
+            item(SettingId::Ambient, s.ambient_light, s.levels[ui.ambient.min(3) as usize].to_string(), None),
+            item(SettingId::Motion, s.motion, if ui.reduced_motion { s.reduced } else { s.full }.to_string(), None),
+        ];
+        let mut system = vec![item(SettingId::RefreshImages, s.refresh_images, String::new(), None)];
+        let info = |label: &str, value: String| SettingItem { id: SettingId::Info, label: label.to_string(), value, on: None, enabled: false };
+        system.push(info(s.launcher, if self.home_mode { "Vision" } else { s.lg_home }.to_string()));
+        system.push(info(s.ip_address, self.ip.clone().unwrap_or_else(|| "–".into())));
+        system.push(info(s.version, env!("CARGO_PKG_VERSION").to_string()));
+        let names = s.sections;
+        vec![
+            (names[0], connections),
+            (names[1], weather),
+            (names[2], clock),
+            (names[3], home),
+            (names[4], rows),
+            (names[5], appearance),
+            (names[6], system),
+        ]
+    }
+
     fn settings_key(&mut self, key: Key) -> Option<Action> {
-        match key {
-            Key::Up if self.settings_row > 0 => self.settings_row -= 1,
-            Key::Down if self.settings_row + 1 < self.settings.len() => self.settings_row += 1,
-            Key::Back => self.mode = Mode::Browse,
-            Key::Ok => {
-                let Kind::Setting { service, connected } = self.settings.get(self.settings_row)?.kind else { return None };
+        let sections = self.settings_sections();
+        let count = sections.get(self.settings_section).map_or(0, |(_, items)| items.len());
+        match (key, self.settings_column) {
+            (Key::Back, 0) => {
+                self.mode = Mode::Browse;
+                self.header = true;
+            }
+            (Key::Back | Key::Left, 1) => self.settings_column = 0,
+            (Key::Up, 0) if self.settings_section > 0 => {
+                self.settings_section -= 1;
+                self.settings_row = 0;
+            }
+            (Key::Down, 0) if self.settings_section + 1 < sections.len() => {
+                self.settings_section += 1;
+                self.settings_row = 0;
+            }
+            (Key::Right | Key::Ok, 0) if count > 0 => self.settings_column = 1,
+            (Key::Up, 1) if self.settings_row > 0 => self.settings_row -= 1,
+            (Key::Down, 1) if self.settings_row + 1 < count => self.settings_row += 1,
+            (Key::Ok, 1) => {
+                let item = sections.into_iter().nth(self.settings_section)?.1.into_iter().nth(self.settings_row)?;
+                if !item.enabled {
+                    return None;
+                }
+                return self.change_setting(item.id);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn change_setting(&mut self, id: SettingId) -> Option<Action> {
+        let ui = &mut self.prefs.ui;
+        match id {
+            SettingId::Service(service) => {
+                let connected = self.settings.iter().find_map(|t| match t.kind {
+                    Kind::Setting { service: s, connected } if s == service => Some(connected),
+                    _ => None,
+                })?;
                 let action = self.open_setting(service, connected);
                 if !matches!(self.mode, Mode::Settings) {
                     self.from_settings = true;
                 }
                 return action;
             }
-            _ => {}
+            SettingId::Location => {
+                self.mode = Mode::Setup { service: Service::Weather, closing_at: None };
+                self.from_settings = true;
+                return Some(Action::Service(ServiceRequest::LocationSetup(true)));
+            }
+            SettingId::HomeTakeover => {
+                self.notice = Some((self.strings.switching.to_string(), Instant::now()));
+                return Some(Action::HomeTakeover(!self.home_mode));
+            }
+            SettingId::RefreshImages => {
+                self.clear_images();
+                self.notice = Some((self.strings.reloading_images.to_string(), Instant::now()));
+                return Some(Action::RefreshImages);
+            }
+            SettingId::Info => return None,
+            SettingId::WeatherShow => ui.weather = !ui.weather,
+            SettingId::Units => ui.fahrenheit = !ui.fahrenheit,
+            SettingId::Clock24 => ui.clock24 = !ui.clock24,
+            SettingId::ShowDate => ui.show_date = !ui.show_date,
+            SettingId::Ambient => ui.ambient = (ui.ambient + 1) % 4,
+            SettingId::Motion => ui.reduced_motion = !ui.reduced_motion,
+            SettingId::Row(i) => {
+                let key = ROW_KEYS[i].0.to_string();
+                if let Some(at) = ui.hidden_rows.iter().position(|h| *h == key) {
+                    ui.hidden_rows.remove(at);
+                } else {
+                    ui.hidden_rows.push(key);
+                }
+                self.fix_active();
+            }
         }
-        None
+        Some(Action::SavePrefs(self.prefs.clone()))
+    }
+
+    /// Forgets uploaded icons and artwork; the platform worker sends them again.
+    fn clear_images(&mut self) {
+        self.icons.clear();
+        self.blended.clear();
+        self.arts.clear();
+        self.free_art.clear();
+        self.icon_next = 0;
+        self.art_next = 0;
     }
 
     fn browse_key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
@@ -1013,6 +1219,7 @@ impl Home {
         let connected = match service {
             Service::HomeAssistant => self.status.ha.is_some(),
             Service::Plex => self.status.plex.is_some(),
+            Service::Weather => self.status.location.is_some(),
             Service::TiviOne | Service::HomeTiles => false,
         };
         match key {
@@ -1021,6 +1228,7 @@ impl Home {
                 match (service, connected) {
                     (Service::HomeAssistant, false) => Some(Action::Service(ServiceRequest::HaSetup(false))),
                     (Service::Plex, false) => Some(Action::Service(ServiceRequest::PlexLink(false))),
+                    (Service::Weather, _) => Some(Action::Service(ServiceRequest::LocationSetup(false))),
                     _ => None,
                 }
             }
@@ -1028,6 +1236,7 @@ impl Home {
                 self.mode = self.after_overlay();
                 Some(Action::Service(match service {
                     Service::HomeAssistant => ServiceRequest::HaDisconnect,
+                    Service::Weather => ServiceRequest::LocationClear,
                     _ => ServiceRequest::PlexDisconnect,
                 }))
             }
@@ -1242,6 +1451,12 @@ impl Home {
 
     /// Advances animations; returns true while anything still moves.
     pub fn update(&mut self, dt: f32) -> bool {
+        if self.prefs.ui.reduced_motion {
+            self.settle();
+            if let Some(tile) = self.focused() {
+                self.ambient = tile.accent;
+            }
+        }
         let mut moving = false;
         for rail in &mut self.rails {
             moving |= rail.scroll.step(dt);
@@ -1301,10 +1516,24 @@ impl Home {
 
     // ---- Drawing --------------------------------------------------------------------
 
-    pub fn draw(&mut self, r: &mut Renderer, text: &mut Text, clock: &str, date: &str) {
+    pub fn draw(&mut self, r: &mut Renderer, text: &mut Text, now: &chrono::DateTime<chrono::Local>) {
+        use chrono::{Datelike, Timelike};
         self.hits.borrow_mut().clear();
+        let ui = &self.prefs.ui;
+        let clock = if ui.clock24 {
+            format!("{:02}:{:02}", now.hour(), now.minute())
+        } else {
+            let (pm, hour) = now.hour12();
+            format!("{hour}:{:02} {}", now.minute(), if pm { "PM" } else { "AM" })
+        };
+        let s = self.strings;
+        let date = if ui.show_date {
+            format!("{}, {} {}", s.days[now.weekday().num_days_from_monday() as usize], now.day(), s.months[now.month0() as usize])
+        } else {
+            String::new()
+        };
         self.draw_backdrop(r);
-        self.draw_header(r, text, clock, date);
+        self.draw_header(r, text, &clock, &date);
         self.draw_hero(r, text);
         self.draw_rails(r, text);
         self.draw_menu(r, text);
@@ -1318,7 +1547,8 @@ impl Home {
 
     fn draw_backdrop(&self, r: &mut Renderer) {
         // Ambient light from the focused tile's colour, upper right.
-        r.radial(1430.0, 280.0, 750.0, 600.0, self.ambient.alpha(0.55));
+        let strength = [0.0, 0.3, 0.55, 0.8][self.prefs.ui.ambient.min(3) as usize];
+        r.radial(1430.0, 280.0, 750.0, 600.0, self.ambient.alpha(strength));
         // Bottom vignette keeps rails legible over the light.
         r.vgradient(Rect::new(0.0, 460.0, LOGICAL_W, 248.0), BG.alpha(0.0), BG.alpha(0.85));
         r.vgradient(Rect::new(0.0, 708.0, LOGICAL_W, 372.0), BG.alpha(0.85), BG);
@@ -1340,10 +1570,13 @@ impl Home {
         let clock_w = text.measure(r, clock, CLOCK);
         let mut x = gear.x - 36.0 - clock_w;
         text.draw(r, clock, x, SAFE_TOP + 39.0, CLOCK, TEXT);
-        x -= 40.0 + text.measure(r, date, HEADER);
-        text.draw(r, date, x, SAFE_TOP + 37.0, HEADER, TEXT.alpha(0.78));
-        if let Some(weather) = self.weather {
-            let label = format!("{:.0}° · {}", weather.temperature, self.strings.weather(weather.code));
+        if !date.is_empty() {
+            x -= 40.0 + text.measure(r, date, HEADER);
+            text.draw(r, date, x, SAFE_TOP + 37.0, HEADER, TEXT.alpha(0.78));
+        }
+        if let Some(weather) = self.weather.filter(|_| self.prefs.ui.weather) {
+            let temperature = if self.prefs.ui.fahrenheit { weather.temperature * 9.0 / 5.0 + 32.0 } else { weather.temperature };
+            let label = format!("{temperature:.0}° · {}", self.strings.weather(weather.code));
             x -= 40.0 + text.measure(r, &label, HEADER);
             text.draw(r, &label, x, SAFE_TOP + 37.0, HEADER, TEXT.alpha(0.78));
         }
@@ -1367,7 +1600,7 @@ impl Home {
         // Passes keep texture switches to a minimum: shapes → artwork → icons → glyphs.
         for pass in 0..4 {
             for (index, rail) in self.rails.iter().enumerate() {
-                if rail.tiles.is_empty() {
+                if !self.has(index) {
                     continue;
                 }
                 let title_y = RAIL_TITLE_Y + self.rail_slot(index) as f32 * RAIL_PITCH + self.vscroll.value;
@@ -1502,6 +1735,30 @@ impl Home {
                     }
                 }
             }
+            Service::Weather => {
+                let ha = self.status.ha.is_some();
+                text.draw_top(r, s.location_title, x, y, SETUP_TITLE, a(1.0));
+                y += 96.0;
+                for (i, step) in s.location_steps.iter().enumerate() {
+                    text.draw_top(r, &format!("{}.", i + 1), x, y, SETUP_BODY, a(0.5));
+                    text.draw_top(r, step, x + 44.0, y, SETUP_BODY, a(0.85));
+                    y += 64.0;
+                }
+                if let Some(name) = &self.status.location {
+                    text.draw_top(r, &format!("{} {name}", s.current_location), x, y + 10.0, SETUP_BODY, a(0.7));
+                    if ha {
+                        let button = draw_button(r, text, s.use_ha_location, x, panel.y + panel.h - 140.0, open);
+                        self.hits.borrow_mut().push((button, Target::SetupButton));
+                    }
+                }
+                if let Some((url, qr)) = &self.qr {
+                    let side = 380.0;
+                    let q = Rect::new(panel.x + panel.w - side - 64.0, panel.y + 64.0, side, side);
+                    draw_qr(r, qr, q, open);
+                    let w = text.measure(r, url, SETUP_SMALL);
+                    text.draw_top(r, url, q.x + (side - w) * 0.5, q.y + side + 22.0, SETUP_SMALL, a(0.6));
+                }
+            }
             Service::Plex | Service::TiviOne | Service::HomeTiles => {
                 if let Some(account) = &self.status.plex {
                     text.draw_top(r, s.plex, x, y, SETUP_TITLE, a(1.0));
@@ -1575,32 +1832,69 @@ impl Home {
         }
         let s = self.strings;
         let a = |v: f32| TEXT.alpha(v * open);
-        r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(0.75 * open));
-        let row_h = 96.0;
-        let height = 150.0 + self.settings.len() as f32 * row_h + 120.0;
-        let panel = Rect::new(460.0, (LOGICAL_H - height) * 0.5 + 16.0 * (1.0 - open), 1000.0, height);
+        r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(0.82 * open));
+        let panel = Rect::new(210.0, 120.0 + 16.0 * (1.0 - open), 1500.0, 840.0);
         draw_panel(r, panel, open);
-        let x = panel.x + 56.0;
-        text.draw_top(r, s.settings, x, panel.y + 48.0, SETUP_TITLE, a(1.0));
-        let hint_w = text.measure(r, s.settings_hint, SETUP_SMALL);
-        text.draw_top(r, s.settings_hint, panel.x + panel.w - 56.0 - hint_w, panel.y + 70.0, SETUP_SMALL, a(0.5));
-        for (i, tile) in self.settings.iter().enumerate() {
-            let row = Rect::new(x - 16.0, panel.y + 140.0 + i as f32 * row_h, panel.w - 80.0, row_h - 12.0);
-            self.hits.borrow_mut().push((row, Target::SettingsRow(i)));
-            let focused = i == self.settings_row;
+        let (x, y) = (panel.x + 56.0, panel.y + 48.0);
+        text.draw_top(r, s.settings, x, y, SETUP_TITLE, a(1.0));
+        let hint = if self.settings_column == 0 { s.settings_hint } else { s.settings_list_hint };
+        let hint_w = text.measure(r, hint, SETUP_SMALL);
+        text.draw_top(r, hint, panel.x + panel.w - 56.0 - hint_w, y + 22.0, SETUP_SMALL, a(0.5));
+
+        let sections = self.settings_sections();
+        let top = panel.y + 150.0;
+        let (section_w, row_h) = (360.0, 72.0);
+        for (i, (name, _)) in sections.iter().enumerate() {
+            let row = Rect::new(x - 16.0, top + i as f32 * row_h, section_w, row_h - 10.0);
+            self.hits.borrow_mut().push((row, Target::SettingsSection(i)));
+            let current = i == self.settings_section;
+            let focused = current && self.settings_column == 0;
+            if focused {
+                r.rect(row, 14.0, TEXT.alpha(open));
+            } else if current {
+                r.rect(row, 14.0, TEXT.alpha(0.08 * open));
+            }
+            text.draw(r, name, row.x + 20.0, row.y + 42.0, MENU_ITEM, if focused { BG } else { TEXT }.alpha(open));
+        }
+
+        let list_x = x + section_w + 40.0;
+        let list_w = panel.x + panel.w - 56.0 - list_x;
+        let Some((_, items)) = sections.get(self.settings_section) else { return };
+        let item_h = 84.0;
+        for (i, item) in items.iter().enumerate() {
+            let row = Rect::new(list_x, top + i as f32 * item_h, list_w, item_h - 12.0);
+            if item.enabled {
+                self.hits.borrow_mut().push((row, Target::SettingsRow(i)));
+            }
+            let focused = self.settings_column == 1 && i == self.settings_row;
             if focused {
                 r.rect(row, 16.0, TEXT.alpha(open));
             }
             let color = if focused { BG } else { TEXT };
-            let connected = matches!(tile.kind, Kind::Setting { connected: true, .. });
-            let dot = if connected { CONNECTED } else { color.alpha(0.3) };
-            r.rect(Rect::new(row.x + 24.0, row.y + row.h * 0.5 - 6.0, 12.0, 12.0), 6.0, dot.fade(open));
-            text.draw(r, &tile.title, row.x + 56.0, row.y + 52.0, MENU_ITEM, color.alpha(open));
-            let w = text.measure(r, &tile.detail, INPUT_SUB);
-            text.draw(r, &tile.detail, row.x + row.w - 24.0 - w, row.y + 50.0, INPUT_SUB, color.alpha(0.6 * open));
+            let dim = if item.enabled { 1.0 } else { 0.55 };
+            text.draw(r, &item.label, row.x + 24.0, row.y + 46.0, MENU_ITEM, color.alpha(open * dim));
+            let mut right = row.x + row.w - 24.0;
+            if let Some(on) = item.on {
+                // Switch: a pill track with a knob.
+                let track = Rect::new(right - 60.0, row.y + (row.h - 32.0) * 0.5, 60.0, 32.0);
+                let fill = if on { Rgba::hex(0x4ADE80) } else { color.alpha(0.25) };
+                r.rect(track, 16.0, fill.fade(open));
+                let knob_x = if on { track.x + track.w - 28.0 } else { track.x + 4.0 };
+                r.rect(Rect::new(knob_x, track.y + 4.0, 24.0, 24.0), 12.0, Rgba::hex(0xFFFFFF).alpha(open));
+                right = track.x - 20.0;
+            }
+            if !item.value.is_empty() && item.on.is_none() || item.on.is_some() && !matches!(item.id, SettingId::Row(_) | SettingId::WeatherShow | SettingId::ShowDate | SettingId::HomeTakeover) {
+                let value = clip(text, r, &item.value, INPUT_SUB, list_w * 0.5);
+                let w = text.measure(r, &value, INPUT_SUB);
+                text.draw(r, &value, right - w, row.y + 44.0, INPUT_SUB, color.alpha(0.6 * open));
+            }
         }
-        let about = format!("{} · {} {}", s.about, s.version, env!("CARGO_PKG_VERSION"));
-        text.draw_top(r, &about, x, panel.y + panel.h - 70.0, SETUP_SMALL, a(0.45));
+        if self.settings_section == 3 {
+            let y = top + items.len() as f32 * item_h + 16.0;
+            for (i, line) in wrap(text, r, s.home_button_note, INPUT_SUB, list_w - 48.0).iter().enumerate() {
+                text.draw_top(r, line, list_x + 24.0, y + i as f32 * 30.0, INPUT_SUB, a(0.5));
+            }
+        }
     }
 
     fn draw_picker(&self, r: &mut Renderer, text: &mut Text) {

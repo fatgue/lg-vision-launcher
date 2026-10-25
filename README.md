@@ -49,9 +49,14 @@ Persistent data lives in `/media/developer/vision` on the TV (survives reinstall
 - **Left / Right / Up / Down** move the focus; **OK** opens the app or input.
 - **Hold OK** on a favourite opens a menu: **Move** (Left / Right, OK to finish, Back to cancel) or **Hide**.
 - Hidden apps appear in their own row at the bottom; **hold OK** there to show them again.
-- **Settings:** press **Up** from the top row (or click the gear, top right): Home Assistant,
-  Home tiles (choose entities by category and room), Plex and TiviOne. Back returns to Settings
-  from a setup panel or the picker, and closes Settings.
+- **Settings:** press **Up** from the top row (or click the gear, top right). Sections:
+  - Connections: Home Assistant, Home tiles (entities by category and room), Plex, TiviOne
+  - Weather: show/hide, location (from Home Assistant or a city entered on the phone), °C/°F
+  - Clock: 24-/12-hour, show date
+  - Home button: Vision as Home on/off (switches tv/home.sh as root)
+  - Rows: show/hide Continue watching, Live TV, Home, Inputs, Hidden apps
+  - Appearance: ambient light (off/low/normal/high), motion (full/reduced)
+  - System: reload app images, launcher, IP address, version
 - **Magic Remote:** point to focus, click to open, hold to open the menu, wheel to step along a row.
 
 ## Vision as Home

@@ -86,6 +86,21 @@ fn handle(mut stream: TcpStream, key: &str, requests: &Sender<ServiceRequest>) -
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
 
     match (method, path) {
+        ("GET", "/location") if net::form_field(query, "k").as_deref() == Some(key) => respond(&mut stream, "200 OK", &location_form(key, None)),
+        ("POST", "/location") if net::form_field(&body, "k").as_deref() == Some(key) => {
+            let city = net::form_field(&body, "city").unwrap_or_default();
+            match geocode(city.trim()) {
+                Ok((name, lat, lon)) => {
+                    let _ = requests.send(ServiceRequest::LocationSet { name: name.clone(), lat, lon });
+                    respond(
+                        &mut stream,
+                        "200 OK",
+                        &page("Location set", &format!("<h1>Location set</h1><p>Vision now shows the weather for <b>{}</b>. You can close this page.</p>", escape(&name))),
+                    )
+                }
+                Err(error) => respond(&mut stream, "200 OK", &location_form(key, Some(&error))),
+            }
+        }
         ("GET", "/") if net::form_field(query, "k").as_deref() == Some(key) => respond(&mut stream, "200 OK", &form(key, None)),
         ("POST", "/save") if net::form_field(&body, "k").as_deref() == Some(key) => {
             let url = normalise_url(&net::form_field(&body, "url").unwrap_or_default());
@@ -116,6 +131,39 @@ fn verify(url: &str, token: &str) -> Result<(), String> {
         Err(error) if error.contains("401") => Err("Home Assistant rejected the token.".into()),
         Err(error) => Err(format!("Could not reach Home Assistant at {url} ({error}).")),
     }
+}
+
+/// City name to "Name, Country" and coordinates (Open-Meteo geocoding, no key needed).
+fn geocode(city: &str) -> Result<(String, f64, f64), String> {
+    if city.is_empty() {
+        return Err("Please enter a city or town.".into());
+    }
+    let url = format!("https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language=en&format=json", net::encode(city));
+    let reply = net::get_json(&net::agent(), &url, &[]).map_err(|_| "The location service is not reachable.".to_string())?;
+    let hit = reply.pointer("/results/0").ok_or(format!("No place called \"{city}\" was found."))?;
+    let name = hit.get("name").and_then(|v| v.as_str()).unwrap_or(city);
+    let country = hit.get("country").and_then(|v| v.as_str()).unwrap_or_default();
+    let label = if country.is_empty() { name.to_string() } else { format!("{name}, {country}") };
+    let lat = hit.get("latitude").and_then(|v| v.as_f64()).ok_or("Incomplete location data.")?;
+    let lon = hit.get("longitude").and_then(|v| v.as_f64()).ok_or("Incomplete location data.")?;
+    Ok((label, lat, lon))
+}
+
+fn location_form(key: &str, error: Option<&str>) -> String {
+    let error = error.map(|e| format!("<p class=\"error\">{}</p>", escape(e))).unwrap_or_default();
+    page(
+        "Weather location",
+        &format!(
+            r#"<h1>Weather location</h1>
+<p>Enter the city or town Vision should show the weather for.</p>
+{error}
+<form method="post" action="/location">
+<input type="hidden" name="k" value="{key}">
+<label>City or town<input name="city" placeholder="Hamburg" autocomplete="address-level2" required></label>
+<button type="submit">Save</button>
+</form>"#
+        ),
+    )
 }
 
 fn normalise_url(raw: &str) -> String {

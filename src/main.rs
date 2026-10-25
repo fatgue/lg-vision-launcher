@@ -33,7 +33,7 @@ use crate::render::Renderer;
 use crate::sdl::{Event, Sdl};
 use crate::services::Services;
 use crate::text::Text;
-use chrono::{Datelike, Timelike};
+use chrono::Timelike;
 use std::ffi::{c_int, CString};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -157,6 +157,7 @@ fn run(started: Instant) -> Result<(), String> {
     let mut text = Text::new(&renderer, prewarmed);
     log!("glyphs: {} prewarmed, waited {} ms", text.glyph_count(), glyph_wait.elapsed().as_millis());
     let mut home = Home::new(&renderer, prefs);
+    home.set_home_mode(home_mode);
     if home_mode {
         register_home(sdl.waker())?;
         log!("running as Home");
@@ -361,8 +362,7 @@ fn run(started: Instant) -> Result<(), String> {
         let before_begin = Instant::now();
         renderer.begin((w, h), theme::BG);
         let began = Instant::now();
-        let clock = format!("{:02}:{:02}", now.hour(), now.minute());
-        home.draw(&mut renderer, &mut text, &clock, &format_date(&now, strings::current()));
+        home.draw(&mut renderer, &mut text, &now);
         renderer.end();
         let submitted = Instant::now();
         let last = options.frames.is_some_and(|n| frames + 1 >= n);
@@ -419,6 +419,8 @@ fn dispatch(action: Action, io: &Io) -> bool {
         }
         Some(Action::SavePrefs(prefs)) => platform.send(Request::SavePrefs(prefs)),
         Some(Action::Service(request)) => io.services.send(request),
+        Some(Action::HomeTakeover(on)) => platform.send(Request::HomeTakeover(on)),
+        Some(Action::RefreshImages) => platform.send(Request::RefreshImages),
         // On the TV, Back on the first tile hands over to LG's Home and Vision stays resident,
         // so the next launch is a warm relaunch instead of a cold start.
         Some(Action::Exit) if WEBOS => {
@@ -582,14 +584,6 @@ fn ms_to_next_minute() -> c_int {
     ms.clamp(50, 60_000) as c_int
 }
 
-fn format_date(now: &chrono::DateTime<chrono::Local>, s: &strings::Strings) -> String {
-    format!(
-        "{}, {} {}",
-        s.days[now.weekday().num_days_from_monday() as usize],
-        now.day(),
-        s.months[now.month0() as usize]
-    )
-}
 
 fn save_screenshot(renderer: &Renderer, (w, h): (c_int, c_int), path: &Path) -> Result<(), String> {
     let mut pixels = vec![0u8; (w * h * 4) as usize];

@@ -271,6 +271,10 @@ pub struct Status {
     pub plex_code: Option<String>,
     pub plex_error: Option<String>,
     pub tivione: Option<bool>,
+    /// Custom weather location (None: from Home Assistant).
+    pub location: Option<String>,
+    /// Phone page address while choosing a weather location.
+    pub location_setup: Option<String>,
 }
 
 pub enum ServiceRequest {
@@ -284,12 +288,19 @@ pub enum ServiceRequest {
     PlexLink(bool),
     PlexDisconnect,
     TiviOne(bool),
+    LocationSetup(bool),
+    LocationSet { name: String, lat: f64, lon: f64 },
+    LocationClear,
 }
 
 pub const TIVIONE_APP: &str = "com.tivione.tv";
 
 pub enum Request {
     Refresh,
+    /// Switch the Home key between Vision and LG Home (root, via tv/home.sh).
+    HomeTakeover(bool),
+    /// Drop the icon and artwork caches and load everything again.
+    RefreshImages,
     Launch { app_id: String, params: Option<Value> },
     SavePrefs(crate::storage::Prefs),
 }

@@ -108,6 +108,8 @@ mod backend {
                     log!("preview: would launch {app_id}");
                     sink.send(Update::Notice(Notice::PreviewLaunch(app_id)));
                 }
+                Request::HomeTakeover(on) => log!("preview: home takeover {on}"),
+                Request::RefreshImages => log!("preview: refresh images"),
                 Request::SavePrefs(prefs) => save_prefs(&prefs, &data_dir),
             }
         }
@@ -159,6 +161,27 @@ mod backend {
                 }
                 Request::Launch { app_id, params } => launch(&mut luna, &sink, &app_id, params),
                 Request::SavePrefs(prefs) => save_prefs(&prefs, &state.data_dir),
+                Request::HomeTakeover(on) => {
+                    // As root through Homebrew Channel; while Vision is Home, disabling ends
+                    // this very process (LG Home takes over), enabling restarts it as Home.
+                    let command = if on {
+                        "sh /media/developer/apps/usr/palm/applications/com.vision.launcher/home.sh enable"
+                    } else {
+                        "sh /var/lib/vision-home/home.sh disable"
+                    };
+                    match exec(&mut luna, command) {
+                        Ok(output) => log!("home takeover {on}: {}", output.trim()),
+                        Err(error) => log!("home takeover {on}: {error}"),
+                    }
+                }
+                Request::RefreshImages => {
+                    for kind in ["icons", "art"] {
+                        let _ = std::fs::remove_dir_all(state.data_dir.join(kind));
+                    }
+                    state.images_sent.clear();
+                    refresh(&mut luna, &sink, &mut state);
+                    state.last_refresh = Some(Instant::now());
+                }
             }
         }
     }

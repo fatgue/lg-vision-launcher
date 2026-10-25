@@ -25,6 +25,27 @@ pub struct Prefs {
     /// Favourites in the user's order; apps not listed follow in LG's order.
     pub order: Vec<String>,
     pub hidden: Vec<String>,
+    pub ui: UiPrefs,
+}
+
+/// Choices from the Settings panel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UiPrefs {
+    pub weather: bool,
+    pub fahrenheit: bool,
+    pub clock24: bool,
+    pub show_date: bool,
+    /// Rows the user switched off: "continue", "tv", "home", "inputs", "hidden".
+    pub hidden_rows: Vec<String>,
+    /// Ambient light: 0 off, 1 low, 2 normal, 3 high.
+    pub ambient: u8,
+    pub reduced_motion: bool,
+}
+
+impl Default for UiPrefs {
+    fn default() -> Self {
+        Self { weather: true, fahrenheit: false, clock24: true, show_date: true, hidden_rows: Vec::new(), ambient: 2, reduced_motion: false }
+    }
 }
 
 impl Prefs {
@@ -42,14 +63,44 @@ impl Prefs {
                 .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                 .unwrap_or_default()
         };
-        Self { order: list("order"), hidden: list("hidden") }
+        let ui = value.get("ui");
+        let flag = |key: &str, default: bool| ui.and_then(|u| u.get(key)).and_then(Value::as_bool).unwrap_or(default);
+        let defaults = UiPrefs::default();
+        let ui = UiPrefs {
+            weather: flag("weather", defaults.weather),
+            fahrenheit: flag("fahrenheit", defaults.fahrenheit),
+            clock24: flag("clock24", defaults.clock24),
+            show_date: flag("showDate", defaults.show_date),
+            hidden_rows: ui
+                .and_then(|u| u.get("hiddenRows"))
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default(),
+            ambient: ui.and_then(|u| u.get("ambient")).and_then(Value::as_u64).map_or(defaults.ambient, |a| a.min(3) as u8),
+            reduced_motion: flag("reducedMotion", defaults.reduced_motion),
+        };
+        Self { order: list("order"), hidden: list("hidden"), ui }
     }
 
     /// Atomic write (temp file + rename) so a power cut never leaves half a file.
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         let temp = dir.join("prefs.json.tmp");
-        let body = json!({ "version": 1, "order": self.order, "hidden": self.hidden });
+        let ui = &self.ui;
+        let body = json!({
+            "version": 1,
+            "order": self.order,
+            "hidden": self.hidden,
+            "ui": {
+                "weather": ui.weather,
+                "fahrenheit": ui.fahrenheit,
+                "clock24": ui.clock24,
+                "showDate": ui.show_date,
+                "hiddenRows": ui.hidden_rows,
+                "ambient": ui.ambient,
+                "reducedMotion": ui.reduced_motion,
+            },
+        });
         std::fs::write(&temp, serde_json::to_vec_pretty(&body).unwrap_or_default())?;
         std::fs::rename(temp, dir.join("prefs.json"))
     }

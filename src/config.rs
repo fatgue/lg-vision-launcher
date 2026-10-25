@@ -19,6 +19,7 @@ pub struct Config {
     pub tivione_key: Option<String>,
     /// Weather location override; otherwise taken from Home Assistant.
     pub location: Option<(f64, f64)>,
+    pub location_name: Option<String>,
 }
 
 impl Config {
@@ -46,6 +47,7 @@ impl Config {
             location: value
                 .get("location")
                 .and_then(|l| Some((l.get("lat")?.as_f64()?, l.get("lon")?.as_f64()?))),
+            location_name: value.pointer("/location/name").and_then(Value::as_str).map(str::to_string),
         };
         if config.plex_client_id.is_empty() {
             config.plex_client_id = random_id();
@@ -71,7 +73,7 @@ impl Config {
             "tivioneKey": self.tivione_key,
         });
         if let Some((lat, lon)) = self.location {
-            body["location"] = json!({ "lat": lat, "lon": lon });
+            body["location"] = json!({ "lat": lat, "lon": lon, "name": self.location_name });
         }
         let temp = dir.join("config.json.tmp");
         std::fs::write(&temp, serde_json::to_vec_pretty(&body).unwrap_or_default())?;
