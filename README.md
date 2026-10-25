@@ -48,7 +48,7 @@ How it stays fast:
 Vision needs a **rooted** LG webOS TV with [Homebrew Channel](https://github.com/webosbrew/webos-homebrew-channel)
 (root is used for the app list and artwork, switching the Home key and installing TiviOne).
 
-1. Download the `.ipk` from the [latest release](https://github.com/fatgue/vision-launcher/releases).
+1. Download the `.ipk` from the [latest release](https://github.com/fatgue/lg-vision-launcher/releases).
 2. Install it with Homebrew Channel or the webOS Dev Manager.
 3. Open Vision. To make it your Home launcher: **Settings → Home button → Vision as Home**.
 
