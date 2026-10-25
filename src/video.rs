@@ -46,7 +46,8 @@ mod imp {
 
     enum Command {
         Show(Stream),
-        Hide,
+        /// Stop; the sender (if any) hears back once the pipeline is gone.
+        Hide(Option<mpsc::SyncSender<()>>),
     }
 
     pub struct Video {
@@ -166,7 +167,17 @@ mod imp {
 
         pub fn hide(&self) {
             if let Some(tx) = self.tx.borrow().as_ref() {
-                let _ = tx.send(Command::Hide);
+                let _ = tx.send(Command::Hide(None));
+            }
+        }
+
+        /// Stops the preview and waits (briefly) until the media server has let go of the
+        /// decoder, so an app started next never competes with it for the video hardware.
+        pub fn release(&self) {
+            let Some(tx) = self.tx.borrow().as_ref().cloned() else { return };
+            let (done, wait) = mpsc::sync_channel(1);
+            if tx.send(Command::Hide(Some(done))).is_ok() && wait.recv_timeout(std::time::Duration::from_millis(1500)).is_err() {
+                log!("preview: release timed out");
             }
         }
     }
@@ -247,7 +258,15 @@ mod imp {
             if let Some(id) = media.take() {
                 let _ = bus.call("luna://com.webos.media/unload", &json!({ "mediaId": id }));
             }
-            let Command::Show(stream) = command else { continue };
+            let stream = match command {
+                Command::Show(stream) => stream,
+                Command::Hide(done) => {
+                    if let Some(done) = done {
+                        let _ = done.send(());
+                    }
+                    continue;
+                }
+            };
             let transport = if stream.url.to_ascii_lowercase().contains(".m3u8") { "HLS" } else { "URI" };
             let mut option = json!({
                 "appId": app_id,
@@ -312,6 +331,8 @@ mod imp {
         }
 
         pub fn hide(&self) {}
+
+        pub fn release(&self) {}
     }
 }
 

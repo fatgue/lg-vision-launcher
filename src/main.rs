@@ -470,7 +470,7 @@ fn dispatch(action: Action, io: &Io) -> bool {
         Some(Action::Preview(None)) => io.video.hide(),
         Some(Action::Launch { app_id, params }) => {
             // The app about to start needs the video decoder: release the preview first.
-            io.video.hide();
+            io.video.release();
             log!("launch {app_id}");
             platform.send(Request::Launch { app_id, params });
         }
@@ -481,7 +481,7 @@ fn dispatch(action: Action, io: &Io) -> bool {
         Some(Action::Refresh) => platform.send(Request::Refresh),
         Some(Action::Install(release)) => {
             // The installer may end a running TiviOne; free the decoder like a launch does.
-            io.video.hide();
+            io.video.release();
             platform.send(Request::Install(release));
         }
         Some(Action::Pictures(release)) => platform.send(Request::Pictures(release)),
