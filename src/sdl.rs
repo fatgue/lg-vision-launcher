@@ -89,6 +89,11 @@ impl Event {
         i32::from_ne_bytes(self.bytes[20..24].try_into().unwrap())
     }
 
+    /// SDL_KeyboardEvent.keysym.scancode
+    pub fn key_scancode(&self) -> i32 {
+        i32::from_ne_bytes(self.bytes[16..20].try_into().unwrap())
+    }
+
     /// SDL_KeyboardEvent.repeat
     pub fn key_repeat(&self) -> bool {
         self.bytes[13] != 0

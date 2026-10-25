@@ -214,7 +214,7 @@ fn run(started: Instant) -> Result<(), String> {
                     dirty = true;
                     platform.send(Request::Refresh);
                 }
-                sdl::KEYDOWN => match map_key(event.key_sym()) {
+                sdl::KEYDOWN => match map_key(event.key_sym(), event.key_scancode()) {
                     Some(Key::Ok) => {
                         if !event.key_repeat() && ok_down.is_none() {
                             ok_down = Some(Instant::now());
@@ -227,7 +227,7 @@ fn run(started: Instant) -> Result<(), String> {
                         }
                         dirty = true;
                     }
-                    None => {}
+                    None => log!("key: unmapped sym {:#x} scancode {}", event.key_sym(), event.key_scancode()),
                 },
                 // Magic Remote: the pointer focuses what it is over; its button acts as OK
                 // (held = long press), the wheel steps along the row.
@@ -261,7 +261,7 @@ fn run(started: Instant) -> Result<(), String> {
                     }
                     dirty = true;
                 }
-                sdl::KEYUP if map_key(event.key_sym()) == Some(Key::Ok) => {
+                sdl::KEYUP if map_key(event.key_sym(), event.key_scancode()) == Some(Key::Ok) => {
                     if ok_down.take().is_some() && !long_fired && apply(&mut home, &io, Key::Ok) {
                         break 'main;
                     }
@@ -543,7 +543,12 @@ fn find_assets(exe_dir: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "assets/fonts not found".to_string())
 }
 
-fn map_key(sym: i32) -> Option<Key> {
+/// Remote keys. Back also by scancode: SDL-webOS may report the webOS Back key (scancode 482)
+/// or AC_BACK (270) without a keycode.
+fn map_key(sym: i32, scancode: i32) -> Option<Key> {
+    if matches!(scancode, 482 | 270) {
+        return Some(Key::Back);
+    }
     Some(match sym {
         sdl::KEY_LEFT => Key::Left,
         sdl::KEY_RIGHT => Key::Right,

@@ -30,7 +30,6 @@ const TV_COMING: usize = 4;
 const HOME: usize = 5;
 const INPUTS: usize = 6;
 const HIDDEN: usize = 7;
-const SETTINGS: usize = 8;
 const DIGIT_WAIT: Duration = Duration::from_millis(1600);
 const PLEX_APP: &str = "cdp-30";
 
@@ -191,6 +190,8 @@ enum Mode {
     Offer { yes: bool },
     /// Choosing the Home Assistant entities for the Home row.
     Picker(Picker),
+    /// The Settings panel (opened from the gear in the header).
+    Settings,
 }
 
 const PICKER_ROWS: usize = 10;
@@ -242,6 +243,8 @@ enum Target {
     SetupButton,
     PickerCategory(usize),
     PickerRow(usize),
+    Gear,
+    SettingsRow(usize),
 }
 
 struct Hero {
@@ -253,7 +256,7 @@ struct Hero {
 
 pub struct Home {
     strings: &'static Strings,
-    rails: [Rail; 9],
+    rails: [Rail; 8],
     active: usize,
     mode: Mode,
     prefs: Prefs,
@@ -284,6 +287,13 @@ pub struct Home {
     qr: Option<(String, qrcodegen::QrCode)>,
     notice: Option<(String, Instant)>,
     hits: RefCell<Vec<(Rect, Target)>>,
+    /// Settings rows (connections, Home tiles, TiviOne), built from the service status.
+    settings: Vec<Tile>,
+    settings_row: usize,
+    /// The gear in the header has focus.
+    header: bool,
+    /// A setup panel or the picker was opened from Settings: Back returns there.
+    from_settings: bool,
     pub loaded: bool,
 }
 
@@ -300,7 +310,6 @@ impl Home {
                 Rail::new(300.0, 150.0),
                 Rail::new(300.0, 120.0),
                 Rail::new(300.0, 170.0),
-                Rail::new(300.0, 120.0),
             ],
             active: FAVORITES,
             mode: Mode::Browse,
@@ -331,6 +340,10 @@ impl Home {
             qr: None,
             notice: None,
             hits: RefCell::new(Vec::new()),
+            settings: Vec::new(),
+            settings_row: 0,
+            header: false,
+            from_settings: false,
             loaded: false,
         }
     }
@@ -351,8 +364,11 @@ impl Home {
     pub fn pointer(&mut self, x: f32, y: f32) -> bool {
         let Some(target) = self.hit(x, y) else { return false };
         let changed = match (target, &mut self.mode) {
+            (Target::Gear, Mode::Browse) => !std::mem::replace(&mut self.header, true),
+            (Target::SettingsRow(i), Mode::Settings) => std::mem::replace(&mut self.settings_row, i) != i,
             (Target::Tile { rail, index }, Mode::Browse) => {
-                let changed = self.active != rail || self.rails[rail].focus != index;
+                let changed = self.active != rail || self.rails[rail].focus != index || self.header;
+                self.header = false;
                 self.active = rail;
                 self.rails[rail].focus = index;
                 changed
@@ -398,8 +414,7 @@ impl Home {
             TV_COMING => s.tv_coming,
             HOME => s.home,
             INPUTS => s.inputs,
-            HIDDEN => s.hidden,
-            _ => s.settings,
+            _ => s.hidden,
         }
     }
 
@@ -580,7 +595,8 @@ impl Home {
             .as_ref()
             .and_then(|url| qrcodegen::QrCode::encode_text(url, qrcodegen::QrCodeEcc::Medium).ok().map(|qr| (url.clone(), qr)));
         self.status = status;
-        self.rails[SETTINGS].replace(tiles);
+        self.settings = tiles;
+        self.settings_row = self.settings_row.min(self.settings.len().saturating_sub(1));
         self.maybe_offer();
         self.refocus(false);
     }
@@ -777,11 +793,49 @@ impl Home {
             Mode::Setup { .. } => self.setup_key(key),
             Mode::Offer { .. } => self.offer_key(key),
             Mode::Picker(_) => self.picker_key(key),
+            Mode::Settings => self.settings_key(key),
+            Mode::Browse if self.header => self.header_key(key),
             Mode::Browse if matches!(key, Key::Digit(_)) || (self.digits.is_some() && key == Key::Ok) => self.digit_key(key),
             Mode::Browse => self.browse_key(key, home_mode),
         };
         self.refocus(false);
         action
+    }
+
+    /// Where an overlay opened from Settings returns to.
+    fn after_overlay(&mut self) -> Mode {
+        if std::mem::take(&mut self.from_settings) {
+            Mode::Settings
+        } else {
+            Mode::Browse
+        }
+    }
+
+    fn header_key(&mut self, key: Key) -> Option<Action> {
+        match key {
+            Key::Down | Key::Back => self.header = false,
+            Key::Ok => self.mode = Mode::Settings,
+            _ => {}
+        }
+        None
+    }
+
+    fn settings_key(&mut self, key: Key) -> Option<Action> {
+        match key {
+            Key::Up if self.settings_row > 0 => self.settings_row -= 1,
+            Key::Down if self.settings_row + 1 < self.settings.len() => self.settings_row += 1,
+            Key::Back => self.mode = Mode::Browse,
+            Key::Ok => {
+                let Kind::Setting { service, connected } = self.settings.get(self.settings_row)?.kind else { return None };
+                let action = self.open_setting(service, connected);
+                if !matches!(self.mode, Mode::Settings) {
+                    self.from_settings = true;
+                }
+                return action;
+            }
+            _ => {}
+        }
+        None
     }
 
     fn browse_key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
@@ -790,11 +844,11 @@ impl Home {
         match key {
             Key::Left if focus > 0 => self.rails[active].focus -= 1,
             Key::Right if focus + 1 < count => self.rails[active].focus += 1,
-            Key::Up => {
-                if let Some(rail) = (0..active).rev().find(|&r| self.has(r)) {
-                    self.active = rail;
-                }
-            }
+            Key::Up => match (0..active).rev().find(|&r| self.has(r)) {
+                Some(rail) => self.active = rail,
+                // Above the top row: the Settings gear.
+                None => self.header = true,
+            },
             Key::Down => {
                 if let Some(rail) = (active + 1..self.rails.len()).find(|&r| self.has(r)) {
                     self.active = rail;
@@ -820,7 +874,7 @@ impl Home {
         if key == Key::Back {
             let choice = p.choice();
             let loaded = !p.loading;
-            self.mode = Mode::Browse;
+            self.mode = self.after_overlay();
             return loaded.then_some(Action::Service(ServiceRequest::HaSelect(choice)));
         }
         if p.loading {
@@ -924,8 +978,14 @@ impl Home {
                 }
                 Some(Action::Service(ServiceRequest::HaAction(tile.id.clone())))
             }
-            Kind::Setting { service: Service::TiviOne, connected } => Some(Action::Service(ServiceRequest::TiviOne(!connected))),
-            Kind::Setting { service: Service::HomeTiles, .. } => {
+            Kind::Setting { service, connected } => self.open_setting(service, connected),
+        }
+    }
+
+    fn open_setting(&mut self, service: Service, connected: bool) -> Option<Action> {
+        match (service, connected) {
+            (Service::TiviOne, connected) => Some(Action::Service(ServiceRequest::TiviOne(!connected))),
+            (Service::HomeTiles, _) => {
                 self.mode = Mode::Picker(Picker {
                     entities: Vec::new(),
                     selected: HashSet::new(),
@@ -937,7 +997,7 @@ impl Home {
                 });
                 Some(Action::Service(ServiceRequest::HaCatalog))
             }
-            Kind::Setting { service, connected } => {
+            (service, connected) => {
                 self.mode = Mode::Setup { service, closing_at: None };
                 match (service, connected) {
                     (Service::HomeAssistant, false) => Some(Action::Service(ServiceRequest::HaSetup(true))),
@@ -957,7 +1017,7 @@ impl Home {
         };
         match key {
             Key::Back => {
-                self.mode = Mode::Browse;
+                self.mode = self.after_overlay();
                 match (service, connected) {
                     (Service::HomeAssistant, false) => Some(Action::Service(ServiceRequest::HaSetup(false))),
                     (Service::Plex, false) => Some(Action::Service(ServiceRequest::PlexLink(false))),
@@ -965,7 +1025,7 @@ impl Home {
                 }
             }
             Key::Ok if connected => {
-                self.mode = Mode::Browse;
+                self.mode = self.after_overlay();
                 Some(Action::Service(match service {
                     Service::HomeAssistant => ServiceRequest::HaDisconnect,
                     _ => ServiceRequest::PlexDisconnect,
@@ -1076,11 +1136,11 @@ impl Home {
 
     fn refocus(&mut self, instant: bool) {
         let moving = matches!(self.mode, Mode::Move { .. });
-        let overlay = matches!(self.mode, Mode::Menu(_) | Mode::Setup { .. } | Mode::Offer { .. } | Mode::Picker(_));
+        let overlay = matches!(self.mode, Mode::Menu(_) | Mode::Setup { .. } | Mode::Offer { .. } | Mode::Picker(_) | Mode::Settings);
         let active = self.active;
         for (r, rail) in self.rails.iter_mut().enumerate() {
             for (i, tile) in rail.tiles.iter_mut().enumerate() {
-                tile.focus.target = if r == active && i == rail.focus { 1.0 } else { 0.0 };
+                tile.focus.target = if r == active && i == rail.focus && !self.header { 1.0 } else { 0.0 };
                 if instant {
                     tile.focus.snap();
                     tile.slot.snap();
@@ -1097,7 +1157,17 @@ impl Home {
         self.lift.target = if moving { 1.0 } else { 0.0 };
         self.vscroll.target = -(self.rail_slot(active) as f32) * RAIL_PITCH;
 
-        let next = self.focused().map(|tile| self.hero_for(tile, moving));
+        let s = self.strings;
+        let next = if self.header {
+            Some(Hero {
+                eyebrow: s.settings.to_uppercase(),
+                title: s.settings.to_string(),
+                sub: s.settings_sub.to_string(),
+                hint: Some(s.press_ok_to_open),
+            })
+        } else {
+            self.focused().map(|tile| self.hero_for(tile, moving))
+        };
         let changed = match (&self.hero, &next) {
             (Some(a), Some(b)) => a.title != b.title || a.eyebrow != b.eyebrow || a.sub != b.sub,
             (None, None) => false,
@@ -1206,7 +1276,7 @@ impl Home {
         }
         if let Mode::Setup { closing_at: Some(at), .. } = self.mode {
             if Instant::now() >= at {
-                self.mode = Mode::Browse;
+                self.mode = self.after_overlay();
                 self.refocus(false);
             }
             moving = true;
@@ -1240,6 +1310,7 @@ impl Home {
         self.draw_menu(r, text);
         self.draw_setup(r, text);
         self.draw_offer(r, text);
+        self.draw_settings(r, text);
         self.draw_picker(r, text);
         self.draw_digits(r, text);
         self.draw_notice(r, text);
@@ -1259,8 +1330,15 @@ impl Home {
         r.rect(Rect::new(cx - 6.0, cy - 6.0, 12.0, 12.0), 6.0, self.ambient);
         text.draw_top(r, "Vision", SAFE_X + 48.0, SAFE_TOP + 7.0, BRAND, TEXT);
 
+        // Settings gear, far right; focusable from the top row with Up.
+        let gear = Rect::new(LOGICAL_W - SAFE_X - 48.0, SAFE_TOP, 48.0, 48.0);
+        self.hits.borrow_mut().push((gear.inflate(8.0), Target::Gear));
+        draw_gear(r, gear, if self.header { TEXT } else { TEXT.alpha(0.7) });
+        if self.header {
+            r.stroke(gear.inflate(10.0), 34.0, 3.0, TEXT);
+        }
         let clock_w = text.measure(r, clock, CLOCK);
-        let mut x = LOGICAL_W - SAFE_X - clock_w;
+        let mut x = gear.x - 36.0 - clock_w;
         text.draw(r, clock, x, SAFE_TOP + 39.0, CLOCK, TEXT);
         x -= 40.0 + text.measure(r, date, HEADER);
         text.draw(r, date, x, SAFE_TOP + 37.0, HEADER, TEXT.alpha(0.78));
@@ -1488,6 +1566,41 @@ impl Home {
             text.draw(r, label, bx + 36.0, by + 42.0, MENU_ITEM, if focused { BG } else { TEXT }.alpha(open));
             bx += w + 20.0;
         }
+    }
+
+    fn draw_settings(&self, r: &mut Renderer, text: &mut Text) {
+        let open = self.overlay.value.clamp(0.0, 1.0);
+        if !matches!(self.mode, Mode::Settings) || open <= 0.01 {
+            return;
+        }
+        let s = self.strings;
+        let a = |v: f32| TEXT.alpha(v * open);
+        r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(0.75 * open));
+        let row_h = 96.0;
+        let height = 150.0 + self.settings.len() as f32 * row_h + 120.0;
+        let panel = Rect::new(460.0, (LOGICAL_H - height) * 0.5 + 16.0 * (1.0 - open), 1000.0, height);
+        draw_panel(r, panel, open);
+        let x = panel.x + 56.0;
+        text.draw_top(r, s.settings, x, panel.y + 48.0, SETUP_TITLE, a(1.0));
+        let hint_w = text.measure(r, s.settings_hint, SETUP_SMALL);
+        text.draw_top(r, s.settings_hint, panel.x + panel.w - 56.0 - hint_w, panel.y + 70.0, SETUP_SMALL, a(0.5));
+        for (i, tile) in self.settings.iter().enumerate() {
+            let row = Rect::new(x - 16.0, panel.y + 140.0 + i as f32 * row_h, panel.w - 80.0, row_h - 12.0);
+            self.hits.borrow_mut().push((row, Target::SettingsRow(i)));
+            let focused = i == self.settings_row;
+            if focused {
+                r.rect(row, 16.0, TEXT.alpha(open));
+            }
+            let color = if focused { BG } else { TEXT };
+            let connected = matches!(tile.kind, Kind::Setting { connected: true, .. });
+            let dot = if connected { CONNECTED } else { color.alpha(0.3) };
+            r.rect(Rect::new(row.x + 24.0, row.y + row.h * 0.5 - 6.0, 12.0, 12.0), 6.0, dot.fade(open));
+            text.draw(r, &tile.title, row.x + 56.0, row.y + 52.0, MENU_ITEM, color.alpha(open));
+            let w = text.measure(r, &tile.detail, INPUT_SUB);
+            text.draw(r, &tile.detail, row.x + row.w - 24.0 - w, row.y + 50.0, INPUT_SUB, color.alpha(0.6 * open));
+        }
+        let about = format!("{} · {} {}", s.about, s.version, env!("CARGO_PKG_VERSION"));
+        text.draw_top(r, &about, x, panel.y + panel.h - 70.0, SETUP_SMALL, a(0.45));
     }
 
     fn draw_picker(&self, r: &mut Renderer, text: &mut Text) {
@@ -1822,6 +1935,17 @@ fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: &TileView, 
             text.draw(r, &tile.detail, x, rect.y + rect.h * 0.5 + 26.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
         }
     }
+}
+
+/// A small gear: a ring with eight teeth and a hub.
+fn draw_gear(r: &mut Renderer, area: Rect, color: Rgba) {
+    let (cx, cy) = (area.x + area.w * 0.5, area.y + area.h * 0.5);
+    for i in 0..8 {
+        let angle = i as f32 * std::f32::consts::FRAC_PI_4;
+        let (tx, ty) = (cx + angle.cos() * 15.0, cy + angle.sin() * 15.0);
+        r.rect(Rect::new(tx - 4.5, ty - 4.5, 9.0, 9.0), 3.0, color);
+    }
+    r.stroke(Rect::new(cx - 11.0, cy - 11.0, 22.0, 22.0), 11.0, 6.0, color);
 }
 
 /// "On · 40 %", "Open", "Playing", "Scene" … for an entity.
