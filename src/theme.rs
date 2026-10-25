@@ -3,6 +3,49 @@ use crate::color::Rgba;
 use crate::strings::Strings;
 use crate::text::{Style, Weight};
 
+/// The overall look of the home screen: layout, navigation, drawing and fonts, not only colours.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Look {
+    /// Hero text and horizontal rows over ambient light (Vision's original design).
+    Cinematic,
+    /// Top Shelf and a five-column app grid, inspired by tvOS.
+    Glass,
+}
+
+impl Look {
+    pub const ALL: [Look; 2] = [Look::Cinematic, Look::Glass];
+
+    /// Stable name in prefs.json and on the command line (`--look`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Look::Cinematic => "cinematic",
+            Look::Glass => "glass",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Self {
+        Look::ALL.into_iter().find(|look| look.id() == id).unwrap_or(Look::Cinematic)
+    }
+
+    /// Regular, Medium and SemiBold, in `assets/fonts`.
+    pub fn fonts(self) -> [&'static str; 3] {
+        ["Outfit-Regular.ttf", "Outfit-Medium.ttf", "Outfit-SemiBold.ttf"]
+    }
+
+    /// Each look keeps its own packed glyph atlas, so switching back is fast.
+    pub fn glyph_cache(self) -> String {
+        format!("glyphs-{}.cache", self.id())
+    }
+
+    pub fn background(self) -> Rgba {
+        BG
+    }
+
+    pub fn prewarm_jobs(self, strings: &Strings) -> Vec<(Style, String)> {
+        prewarm_jobs(strings)
+    }
+}
+
 pub const BG: Rgba = Rgba::hex(0x07080B);
 pub const TEXT: Rgba = Rgba::hex(0xF5F1E8);
 pub const ACCENT_DEFAULT: Rgba = Rgba::hex(0xE9A23B);

@@ -357,6 +357,7 @@ struct Hero {
 }
 
 pub struct Home {
+    look: Look,
     strings: &'static Strings,
     rails: [Rail; 9],
     active: usize,
@@ -421,8 +422,9 @@ pub struct Home {
 }
 
 impl Home {
-    pub fn new(renderer: &Renderer, prefs: Prefs) -> Self {
+    pub fn new(renderer: &Renderer, prefs: Prefs, look: Look) -> Self {
         Self {
+            look,
             strings: strings::current(),
             rails: [
                 Rail::new(300.0, 170.0),
@@ -1474,7 +1476,17 @@ impl Home {
         self.art_next = 0;
     }
 
+    pub fn look(&self) -> Look {
+        self.look
+    }
+
     fn browse_key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
+        match self.look {
+            Look::Cinematic | Look::Glass => self.cinematic_browse_key(key, home_mode),
+        }
+    }
+
+    fn cinematic_browse_key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
         let active = self.active;
         let (focus, count) = (self.rails[active].focus, self.rails[active].tiles.len());
         match key {

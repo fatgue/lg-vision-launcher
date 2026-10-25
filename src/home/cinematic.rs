@@ -3,6 +3,12 @@ use super::*;
 
 impl Home {
     pub fn draw(&mut self, r: &mut Renderer, text: &mut Text, now: &chrono::DateTime<chrono::Local>) {
+        match self.look {
+            Look::Cinematic | Look::Glass => self.draw_cinematic(r, text, now),
+        }
+    }
+
+    pub(super) fn draw_cinematic(&mut self, r: &mut Renderer, text: &mut Text, now: &chrono::DateTime<chrono::Local>) {
         use chrono::{Datelike, Timelike};
         self.hits.borrow_mut().clear();
         let ui = &self.prefs.ui;

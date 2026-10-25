@@ -135,7 +135,13 @@ fn run(started: Instant) -> Result<(), String> {
     // Language: the user's choice, else the TV's.
     strings::set(&if prefs.ui.language.is_empty() { strings::system_language() } else { prefs.ui.language.clone() });
     // Fonts load and UI glyphs rasterise in parallel with SDL/GL bring-up.
-    let glyphs = text::prewarm(assets.join("fonts"), theme::prewarm_jobs(strings::current()), Some(data_dir.join("glyphs.cache")));
+    // --look <id> overrides the saved look (screenshots and tests).
+    let look = theme::Look::from_id(
+        args.iter().position(|a| a == "--look").and_then(|i| args.get(i + 1)).map_or(prefs.ui.theme.as_str(), String::as_str),
+    );
+    // The single cache file of earlier versions; each look has its own now.
+    let _ = std::fs::remove_file(data_dir.join("glyphs.cache"));
+    let glyphs = text::prewarm(assets.join("fonts"), look.fonts(), look.prewarm_jobs(strings::current()), Some(data_dir.join(look.glyph_cache())));
 
     if WEBOS {
         // SDL-webOS reads APPID for its shell surface and WMCLASS from the environment.
@@ -186,7 +192,7 @@ fn run(started: Instant) -> Result<(), String> {
         glyph_wait.elapsed().as_millis()
     );
     let t_glyphs = started.elapsed();
-    let mut home = Home::new(&renderer, prefs);
+    let mut home = Home::new(&renderer, prefs, look);
     home.set_home_mode(home_mode);
     let t_home = started.elapsed();
     let bus = if home_mode {
@@ -450,7 +456,7 @@ fn run(started: Instant) -> Result<(), String> {
         let (mut w, mut h): (c_int, c_int) = (0, 0);
         unsafe { (sdl.gl_get_drawable_size)(window, &mut w, &mut h) };
         let before_begin = Instant::now();
-        renderer.begin((w, h), theme::BG);
+        renderer.begin((w, h), home.look().background());
         let began = Instant::now();
         home.draw(&mut renderer, &mut text, &now);
         renderer.end();

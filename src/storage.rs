@@ -46,6 +46,8 @@ pub struct UiPrefs {
     pub language: String,
     /// The TiviOne tile on Home while TiviOne is not installed (the user can hide it).
     pub tivione_promo: bool,
+    /// The look (`theme::Look::id`).
+    pub theme: String,
 }
 
 impl Default for UiPrefs {
@@ -61,6 +63,7 @@ impl Default for UiPrefs {
             preview: true,
             language: String::new(),
             tivione_promo: true,
+            theme: "cinematic".into(),
         }
     }
 }
@@ -98,6 +101,7 @@ impl Prefs {
             preview: flag("preview", defaults.preview),
             language: ui.and_then(|u| u.get("language")).and_then(Value::as_str).unwrap_or_default().to_string(),
             tivione_promo: flag("tivionePromo", defaults.tivione_promo),
+            theme: ui.and_then(|u| u.get("theme")).and_then(Value::as_str).unwrap_or(&defaults.theme).to_string(),
         };
         Self { order: list("order"), hidden: list("hidden"), ui }
     }
@@ -122,6 +126,7 @@ impl Prefs {
                 "preview": ui.preview,
                 "language": ui.language,
                 "tivionePromo": ui.tivione_promo,
+                "theme": ui.theme,
             },
         });
         std::fs::write(&temp, serde_json::to_vec_pretty(&body).unwrap_or_default())?;

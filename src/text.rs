@@ -14,7 +14,6 @@ use std::thread::JoinHandle;
 const ATLAS_W: i32 = 2048;
 const ATLAS_H: i32 = 2048;
 const PAD: i32 = 1;
-const FONT_FILES: [&str; 3] = ["Outfit-Regular.ttf", "Outfit-Medium.ttf", "Outfit-SemiBold.ttf"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Weight {
@@ -112,18 +111,23 @@ impl Prewarmed {
 
 /// Loads the fonts and rasterises `jobs` (style + the characters it will draw) on a thread,
 /// or reads back the atlas an earlier start packed for the same jobs from `cache`.
-pub fn prewarm(fonts_dir: PathBuf, jobs: Vec<(Style, String)>, cache: Option<PathBuf>) -> JoinHandle<Result<Prewarmed, String>> {
+pub fn prewarm(
+    fonts_dir: PathBuf,
+    font_files: [&'static str; 3],
+    jobs: Vec<(Style, String)>,
+    cache: Option<PathBuf>,
+) -> JoinHandle<Result<Prewarmed, String>> {
     std::thread::Builder::new()
         .name("glyphs".into())
         .spawn(move || {
-            let font_bytes = FONT_FILES
+            let font_bytes = font_files
                 .iter()
                 .map(|file| std::fs::read(fonts_dir.join(file)).map_err(|e| format!("{file}: {e}")))
                 .collect::<Result<Vec<_>, String>>()?;
             let key = cache_key(&jobs, &font_bytes);
             let fonts = font_bytes
                 .into_iter()
-                .zip(FONT_FILES)
+                .zip(font_files)
                 .map(|(bytes, file)| fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).map_err(|e| format!("{file}: {e}")))
                 .collect::<Result<Vec<_>, String>>()?;
             if let Some(packed) = cache.as_deref().and_then(|path| read_cache(path, key)) {
