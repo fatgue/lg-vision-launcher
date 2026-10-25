@@ -24,6 +24,7 @@ const files = [
   [`${appDir}/icon.png`, join(root, 'branding', 'icon.png'), 0o644],
   [`${appDir}/icon-large.png`, join(root, 'branding', 'icon-large.png'), 0o644],
   [`${appDir}/splash.png`, join(root, 'branding', 'splash.png'), 0o644],
+  [`${appDir}/home.sh`, join(root, 'tv', 'home.sh'), 0o755],
   [`${appDir}/lib/libSDL2-2.0.so.0`, join(root, 'third_party', 'sdl-webos', 'libSDL2-2.0.so.0'), 0o755],
   [`${appDir}/licenses/SDL2.txt`, join(root, 'third_party', 'sdl-webos', 'LICENSE-SDL2.txt'), 0o644],
   [`${appDir}/licenses/Outfit-OFL.txt`, join(root, 'assets', 'fonts', 'OFL.txt'), 0o644],

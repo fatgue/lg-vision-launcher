@@ -39,6 +39,18 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const WEBOS: bool = cfg!(all(target_os = "linux", target_arch = "arm"));
+const HOME_ID: &str = "com.webos.app.home";
+/// LG's Home executable. With Vision as Home (tv/home.sh), Vision is bind-mounted over it, so
+/// SAM starts Vision under LG's own Home manifest and LS2 role (lifecycle v2).
+const LG_HOME_EXE: &str = "/usr/bin/com.webos.app.home";
+/// Vision's install directory, for when it runs as LG's Home executable.
+const INSTALL_DIR: &str = "/media/developer/apps/usr/palm/applications/com.vision.launcher";
+/// Written while Vision is Home: a normal tile launch then opens the Home instance instead.
+const HOME_MARKER: &str = "/var/run/vision-home";
+
+fn runs_as_home() -> bool {
+    WEBOS && std::env::current_exe().is_ok_and(|exe| exe == Path::new(LG_HOME_EXE))
+}
 
 struct Options {
     perf: bool,
@@ -50,7 +62,7 @@ struct Options {
 fn main() {
     let started = Instant::now();
     if WEBOS {
-        log::init_file("/tmp/vision.log");
+        log::init_file(if runs_as_home() { "/tmp/vision-home.log" } else { "/tmp/vision.log" });
     }
     if let Err(error) = run(started) {
         log!("vision: {error}");
@@ -88,10 +100,17 @@ fn run(started: Instant) -> Result<(), String> {
             .map(|list| list.split(',').filter_map(parse_key).collect())
             .unwrap_or_default(),
     };
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-        .unwrap_or_default();
+    let home_mode = runs_as_home();
+    let exe_dir = if home_mode {
+        PathBuf::from(INSTALL_DIR)
+    } else {
+        std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_default()
+    };
+    if WEBOS && !home_mode && std::fs::read_to_string(HOME_MARKER).is_ok_and(|m| m.trim() == APP_ID) {
+        // Vision is Home: the app tile just brings that instance forward.
+        open_home();
+        return Ok(());
+    }
     let assets = find_assets(&exe_dir)?;
     // Fonts load and UI glyphs rasterise in parallel with SDL/GL bring-up.
     let glyphs = text::prewarm(assets.join("fonts"), theme::prewarm_jobs(strings::current()));
@@ -100,13 +119,18 @@ fn run(started: Instant) -> Result<(), String> {
 
     if WEBOS {
         // SDL-webOS reads APPID for its shell surface and WMCLASS from the environment.
-        std::env::set_var("APPID", APP_ID);
-        std::env::set_var("SDL_VIDEO_WAYLAND_WMCLASS", APP_ID);
+        let surface = if home_mode { HOME_ID } else { APP_ID };
+        std::env::set_var("APPID", surface);
+        std::env::set_var("SDL_VIDEO_WAYLAND_WMCLASS", surface);
     }
     let sdl = Sdl::open(&sdl_candidates(&exe_dir))?;
     if WEBOS {
         sdl.hint("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
         sdl.hint("SDL_WEBOS_ACCESS_POLICY_KEYS_EXIT", "true");
+        // As Home, SDL cannot register under LG's role; Vision registers with SAM itself below.
+        if home_mode {
+            sdl.hint("SDL_WEBOS_REGISTER_APP", "0");
+        }
     }
     // SAFETY: SDL calls on the main thread in documented order.
     if unsafe { (sdl.init)(sdl::INIT_VIDEO | sdl::INIT_EVENTS) } != 0 {
@@ -133,10 +157,14 @@ fn run(started: Instant) -> Result<(), String> {
     let mut text = Text::new(&renderer, prewarmed);
     log!("glyphs: {} prewarmed, waited {} ms", text.glyph_count(), glyph_wait.elapsed().as_millis());
     let mut home = Home::new(&renderer, prefs);
+    if home_mode {
+        register_home(sdl.waker())?;
+        log!("running as Home");
+    }
     let platform = Platform::start(sdl.waker(), data_dir.clone());
     platform.send(Request::Refresh);
     let services = Services::start(platform.sink(), data_dir);
-    let io = Io { platform: &platform, services: &services };
+    let io = Io { platform: &platform, services: &services, home_mode };
     log!("init: {} ms", started.elapsed().as_millis());
 
     let mut perf = Perf::default();
@@ -171,6 +199,21 @@ fn run(started: Instant) -> Result<(), String> {
         while got != 0 {
             match event.kind() {
                 sdl::QUIT | sdl::APP_TERMINATING => break 'main,
+                sdl::LIFECYCLE_EVENT if event.user_code() == 2 => break 'main,
+                sdl::LIFECYCLE_EVENT => {
+                    // Home key: SAM relaunches the running Home, which brings itself forward.
+                    unsafe {
+                        (sdl.restore_window)(window);
+                        (sdl.show_window)(window);
+                        (sdl.raise_window)(window);
+                    }
+                    if !visible {
+                        services.send(ServiceRequest::Visible(true));
+                    }
+                    visible = true;
+                    dirty = true;
+                    platform.send(Request::Refresh);
+                }
                 sdl::KEYDOWN => match map_key(event.key_sym()) {
                     Some(Key::Ok) => {
                         if !event.key_repeat() && ok_down.is_none() {
@@ -323,11 +366,12 @@ fn run(started: Instant) -> Result<(), String> {
 struct Io<'a> {
     platform: &'a Platform,
     services: &'a Services,
+    home_mode: bool,
 }
 
 /// Feeds a key to the home screen and dispatches the resulting action. Returns true to quit.
 fn apply(home: &mut Home, io: &Io, key: Key) -> bool {
-    match home.key(key, false) {
+    match home.key(key, io.home_mode) {
         Some(action) => dispatch(action, io),
         None => false,
     }
@@ -352,6 +396,44 @@ fn dispatch(action: Action, io: &Io) -> bool {
     }
     false
 }
+
+/// Registers with SAM as LG's Home (lifecycle v2): "relaunch" on the Home key, "close" to exit.
+#[cfg(all(target_os = "linux", target_arch = "arm"))]
+fn register_home(waker: sdl::Waker) -> Result<(), String> {
+    let sink = Box::new(move |message: serde_json::Value| {
+        log!("lifecycle: {message}");
+        let event = message.get("event").or_else(|| message.get("message")).and_then(|v| v.as_str());
+        match event {
+            Some("relaunch") => waker.lifecycle(1),
+            Some("close") => waker.lifecycle(2),
+            // Registration lost (SAM restarted): quit so SAM starts Home afresh.
+            _ if message.get("returnValue").and_then(|v| v.as_bool()) == Some(false) => waker.lifecycle(2),
+            _ => {}
+        }
+    });
+    luna::subscribe(Some(HOME_ID), "luna://com.webos.applicationManager/registerApp", &serde_json::json!({ "id": HOME_ID }), sink)
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+fn register_home(_waker: sdl::Waker) -> Result<(), String> {
+    Ok(())
+}
+
+/// Brings the Home instance forward (used when Vision's own tile is opened while it is Home).
+#[cfg(all(target_os = "linux", target_arch = "arm"))]
+fn open_home() {
+    match luna::Luna::connect() {
+        Ok(mut luna) => {
+            if let Err(error) = luna.call("luna://com.webos.applicationManager/launch", &serde_json::json!({ "id": HOME_ID })) {
+                log!("open home: {error}");
+            }
+        }
+        Err(error) => log!("open home: {error}"),
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+fn open_home() {}
 
 fn create_window(sdl: &Sdl) -> Result<(sdl::Window, sdl::GlContext, bool), String> {
     let title = CString::new("Vision").unwrap();

@@ -3,6 +3,7 @@
 //   node scripts/tv.mjs launch    start Vision
 //   node scripts/tv.mjs log       print /tmp/vision.log
 //   node scripts/tv.mjs shot      capture the UI plane to out/tv.jpg
+//   node scripts/tv.mjs home-enable | home-disable | home-status   Vision as the Home launcher
 // Host/password come from VISION_TV_HOST / VISION_TV_PASSWORD (defaults: 192.168.178.96 / alpine).
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -31,6 +32,8 @@ function install() {
     const out = ssh('cat /tmp/vision-install.txt 2>/dev/null');
     if (/"state"\s*:\s*"installed"/.test(out)) {
       ssh('killall luna-send 2>/dev/null; rm -f /tmp/vision.ipk');
+      // While Vision is Home, the mount still holds the previous binary: re-apply it.
+      ssh('[ -x /var/lib/vision-home/home.sh ] && sh /var/lib/vision-home/home.sh refresh; true');
       console.log(`installed ${id} ${version}`);
       return;
     }
@@ -58,6 +61,9 @@ const commands = {
     sleep(12000);
     commands.log();
   },
+  'home-enable': () => console.log(ssh(`sh /media/developer/apps/usr/palm/applications/${id}/home.sh enable`)),
+  'home-disable': () => console.log(ssh('sh /var/lib/vision-home/home.sh disable')),
+  'home-status': () => console.log(ssh('[ -x /var/lib/vision-home/home.sh ] && sh /var/lib/vision-home/home.sh status || echo "enabled: no"')),
   log: () => console.log(ssh('cat /tmp/vision.log 2>/dev/null || echo "(no log yet)"')),
   shot: () => {
     ssh(

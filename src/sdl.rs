@@ -38,6 +38,8 @@ pub const WINDOWEVENT: u32 = 0x200;
 pub const KEYDOWN: u32 = 0x300;
 pub const KEYUP: u32 = 0x301;
 pub const USEREVENT: u32 = 0x8000;
+/// Lifecycle notices from SAM (code 1: relaunch, 2: close), pushed by the Luna thread.
+pub const LIFECYCLE_EVENT: u32 = 0x8001;
 
 // SDL_WindowEventID
 pub const WINDOWEVENT_SHOWN: u8 = 1;
@@ -92,6 +94,11 @@ impl Event {
     pub fn window_event(&self) -> u8 {
         self.bytes[12]
     }
+
+    /// SDL_UserEvent.code
+    pub fn user_code(&self) -> i32 {
+        i32::from_ne_bytes(self.bytes[12..16].try_into().unwrap())
+    }
 }
 
 dynamic_api! {
@@ -113,6 +120,9 @@ dynamic_api! {
         fn wait_event_timeout = "SDL_WaitEventTimeout": fn(*mut Event, c_int) -> c_int;
         fn push_event = "SDL_PushEvent": fn(*mut Event) -> c_int;
         fn show_cursor = "SDL_ShowCursor": fn(c_int) -> c_int;
+        fn show_window = "SDL_ShowWindow": fn(Window);
+        fn raise_window = "SDL_RaiseWindow": fn(Window);
+        fn restore_window = "SDL_RestoreWindow": fn(Window);
     }
 }
 
@@ -144,6 +154,15 @@ impl Waker {
         let mut event = Event::zeroed();
         event.bytes[0..4].copy_from_slice(&USEREVENT.to_ne_bytes());
         // SAFETY: a zeroed user event is valid; SDL copies it into its queue.
+        unsafe { (self.0)(&mut event) };
+    }
+
+    #[cfg_attr(not(all(target_os = "linux", target_arch = "arm")), allow(dead_code))]
+    pub fn lifecycle(&self, code: i32) {
+        let mut event = Event::zeroed();
+        event.bytes[0..4].copy_from_slice(&LIFECYCLE_EVENT.to_ne_bytes());
+        event.bytes[12..16].copy_from_slice(&code.to_ne_bytes());
+        // SAFETY: as above.
         unsafe { (self.0)(&mut event) };
     }
 }

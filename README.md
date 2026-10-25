@@ -50,6 +50,23 @@ Persistent data lives in `/media/developer/vision` on the TV (survives reinstall
 - **Hold OK** on a favourite opens a menu: **Move** (Left / Right, OK to finish, Back to cancel) or **Hide**.
 - Hidden apps appear in their own row at the bottom; **hold OK** there to show them again.
 
+## Vision as Home
+
+On webOS 5/6, Vision can replace LG's Home launcher (root required):
+
+```sh
+node scripts/tv.mjs home-enable    # or on the TV: sh .../com.vision.launcher/home.sh enable
+node scripts/tv.mjs home-status
+node scripts/tv.mjs home-disable   # restores LG Home (sh /var/lib/vision-home/home.sh disable)
+```
+
+`tv/home.sh` bind-mounts Vision's executable over `/usr/bin/com.webos.app.home`. LG's Home
+manifest and LS2 role stay untouched, nothing on the read-only system partition changes. SAM
+starts Vision in LG Home's place; Vision registers itself (`registerApp`, lifecycle v2), so the
+Home key relaunches the running instance (about 50 ms to the front). A webosbrew boot hook
+(`64-vision-home`) re-applies the mount after a cold boot; `scripts/tv.mjs install` refreshes it
+after an update. Opening Vision's own tile while it is Home brings the Home instance forward.
+
 ## Development
 
 Requirements: Rust (MSVC host), target `armv7-unknown-linux-gnueabi`, [Zig](https://ziglang.org) 0.14 and `cargo-zigbuild` on `PATH`, Node.js, PuTTY (`plink`/`pscp`), `gh`.
@@ -76,9 +93,10 @@ TV access via `VISION_TV_HOST` / `VISION_TV_PASSWORD` (defaults: `192.168.178.96
 - Phase 1 (scaffold) is done: the real app list with icons in LG's order, HDMI inputs, ambient colour taken from the focused icon, launching via Luna.
 - Phase 2 is done: glyph prewarming, the icon disk cache, the favourites editor (move / hide / show) with persistence, and centralised strings ready for localisation.
 
-Vision runs as a dev app and does not take over the Home key yet.
+- Phase 3 is done: weather, Home Assistant (phone setup via QR code), Plex continue watching (plex.tv/link), Settings row, opt-in TiviOne integration (sealed snapshot, deep links, digit entry).
+- Phase 4 is done: Vision is the Home launcher (see above).
 
-Next: weather, Home Assistant, Plex "Continue watching", TiviOne (opt-in), localisation (5 languages), then the Home takeover.
+Next: localisation (5 languages).
 
 ## Third-party licences
 

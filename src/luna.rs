@@ -27,6 +27,7 @@ dynamic_api! {
         fn register = "LSRegister": fn(*const c_char, *mut *mut c_void, *mut LsError) -> bool;
         fn attach = "LSGmainContextAttach": fn(*mut c_void, *mut c_void, *mut LsError) -> bool;
         fn call_one_reply = "LSCallOneReply": fn(*mut c_void, *const c_char, *const c_char, Filter, *mut c_void, *mut c_ulong, *mut LsError) -> bool;
+        fn call = "LSCall": fn(*mut c_void, *const c_char, *const c_char, Filter, *mut c_void, *mut c_ulong, *mut LsError) -> bool;
         fn call_cancel = "LSCallCancel": fn(*mut c_void, c_ulong, *mut LsError) -> bool;
         fn message_payload = "LSMessageGetPayload": fn(*mut c_void) -> *const c_char;
     }
@@ -97,6 +98,12 @@ struct Reply {
 
 impl Luna {
     pub fn connect() -> Result<Self, String> {
+        Self::connect_named(None)
+    }
+
+    /// `name`: a service name this executable's LS2 role allows (SAM identifies a registerApp
+    /// caller by it); None registers anonymously.
+    pub fn connect_named(name: Option<&str>) -> Result<Self, String> {
         let ls = Ls2::open(&[PathBuf::from("libluna-service2.so.3")])?;
         let glib = Glib::open(&[PathBuf::from("libglib-2.0.so.0")])?;
         // SAFETY: GLib returns a fresh context owned by this client.
@@ -105,7 +112,8 @@ impl Luna {
         let mut error = ls.new_error();
         // Anonymous registration: authenticated by our executable's LS2 role, and it does not
         // collide with SDL-webOS's own app-named registration.
-        if !unsafe { (ls.register)(std::ptr::null(), &mut handle, &mut error) } {
+        let name = name.map(|n| CString::new(n).unwrap());
+        if !unsafe { (ls.register)(name.as_ref().map_or(std::ptr::null(), |n| n.as_ptr()), &mut handle, &mut error) } {
             return Err(ls.describe(error, "LSRegister"));
         }
         let mut error = ls.new_error();
@@ -153,4 +161,55 @@ impl Luna {
         }
         Err(format!("{uri}: timed out"))
     }
+}
+
+type Sink = Box<dyn FnMut(Value) + Send>;
+
+struct Subscription {
+    payload_fn: unsafe extern "C" fn(*mut c_void) -> *const c_char,
+    sink: Sink,
+}
+
+extern "C" fn on_message(_handle: *mut c_void, message: *mut c_void, userdata: *mut c_void) -> bool {
+    // SAFETY: userdata is the leaked Subscription owned by the subscription thread.
+    let subscription = unsafe { &mut *(userdata as *mut Subscription) };
+    let payload = unsafe { (subscription.payload_fn)(message) };
+    if !payload.is_null() {
+        let text = unsafe { CStr::from_ptr(payload) }.to_string_lossy();
+        if let Ok(value) = serde_json::from_str(&text) {
+            (subscription.sink)(value);
+        }
+    }
+    true
+}
+
+/// Holds a subscription on its own connection and thread for the life of the process
+/// (SAM's registerApp: the lifecycle of Vision as Home).
+pub fn subscribe(name: Option<&'static str>, uri: &str, payload: &Value, sink: Sink) -> Result<(), String> {
+    let uri = CString::new(uri).map_err(|_| "bad uri")?;
+    let payload = CString::new(payload.to_string()).map_err(|_| "bad payload")?;
+    let (started, handshake) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    std::thread::Builder::new()
+        .name("luna-subscription".into())
+        .spawn(move || {
+            let luna = match Luna::connect_named(name) {
+                Ok(luna) => luna,
+                Err(error) => return drop(started.send(Err(error))),
+            };
+            let userdata = Box::into_raw(Box::new(Subscription { payload_fn: luna.ls.message_payload, sink }));
+            let mut token: c_ulong = 0;
+            let mut error = luna.ls.new_error();
+            // SAFETY: strings outlive the call; the leaked subscription lives as long as the process.
+            let ok = unsafe { (luna.ls.call)(luna.handle, uri.as_ptr(), payload.as_ptr(), on_message, userdata.cast(), &mut token, &mut error) };
+            if !ok {
+                return drop(started.send(Err(luna.ls.describe(error, "subscription"))));
+            }
+            let _ = started.send(Ok(()));
+            loop {
+                // SAFETY: only this thread drives this connection's context.
+                unsafe { (luna.glib.context_iteration)(luna.context, 1) };
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    handshake.recv_timeout(Duration::from_secs(5)).map_err(|_| "subscription: no answer".to_string())?
 }
