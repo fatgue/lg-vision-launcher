@@ -72,7 +72,7 @@ impl Look {
 pub const GLASS_BG: Rgba = Rgba::hex(0x0B0B0F);
 pub const GLASS_LABEL: Style = Style::new(Weight::SemiBold, 26.0);
 pub const GLASS_SECTION: Style = Style::new(Weight::SemiBold, 30.0);
-pub const GLASS_CLOCK: Style = Style::new(Weight::Medium, 32.0);
+pub const GLASS_CLOCK: Style = Style::new(Weight::SemiBold, 46.0);
 
 pub const BG: Rgba = Rgba::hex(0x07080B);
 pub const TEXT: Rgba = Rgba::hex(0xF5F1E8);

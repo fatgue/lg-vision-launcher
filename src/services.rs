@@ -83,6 +83,7 @@ impl Worker {
             plex: config.plex_token.as_ref().map(|_| config.plex_user.clone().unwrap_or_else(|| "Plex".into())),
             tivione: config.tivione,
             location: config.location_name.clone().filter(|_| config.location.is_some()),
+            wallpaper_custom: data_dir.join("wallpaper.jpg").exists(),
             ..Status::default()
         };
         Self {
@@ -203,6 +204,30 @@ impl Worker {
                 self.stop_companion_if_idle();
                 self.publish_status();
                 self.next_weather = now;
+            }
+            ServiceRequest::WallpaperSetup(true) => {
+                self.status.wallpaper_setup = self.companion_url("/wallpaper");
+                self.publish_status();
+            }
+            ServiceRequest::WallpaperSetup(false) => {
+                self.status.wallpaper_setup = None;
+                self.stop_companion_if_idle();
+                self.publish_status();
+            }
+            ServiceRequest::WallpaperUploaded(bytes) => {
+                let path = self.data_dir.join("wallpaper.jpg");
+                let temp = path.with_extension("tmp");
+                match std::fs::write(&temp, &bytes).and_then(|()| std::fs::rename(&temp, &path)) {
+                    Ok(()) => {
+                        log!("wallpaper: photo from the phone, {} KB", bytes.len() / 1024);
+                        self.status.wallpaper_custom = true;
+                        self.status.wallpaper_version += 1;
+                    }
+                    Err(error) => log!("wallpaper: {error}"),
+                }
+                self.status.wallpaper_setup = None;
+                self.stop_companion_if_idle();
+                self.publish_status();
             }
             ServiceRequest::LocationClear => {
                 self.config.location = None;
@@ -465,7 +490,7 @@ impl Worker {
     }
 
     fn stop_companion_if_idle(&mut self) {
-        if self.status.ha_setup.is_none() && self.status.location_setup.is_none() {
+        if self.status.ha_setup.is_none() && self.status.location_setup.is_none() && self.status.wallpaper_setup.is_none() {
             self.companion = None;
         }
     }

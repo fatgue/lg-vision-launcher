@@ -88,6 +88,8 @@ pub enum Update {
     Release(Option<Release>),
     Install(InstallState),
     Picture(Picture),
+    /// The Glass wallpaper, decoded (None: it could not be loaded).
+    Wallpaper(Option<Wallpaper>),
 }
 
 /// TiviOne's home-screen snapshot (see tivione/src/core/launcher.ts).
@@ -315,6 +317,12 @@ pub struct Status {
     pub location: Option<String>,
     /// Phone page address while choosing a weather location.
     pub location_setup: Option<String>,
+    /// Phone page address while sending a wallpaper photo.
+    pub wallpaper_setup: Option<String>,
+    /// A photo from the phone is saved as the wallpaper `custom`.
+    pub wallpaper_custom: bool,
+    /// Counts photos received, so the screen can switch to a new one.
+    pub wallpaper_version: u32,
 }
 
 pub enum ServiceRequest {
@@ -331,6 +339,9 @@ pub enum ServiceRequest {
     LocationSetup(bool),
     LocationSet { name: String, lat: f64, lon: f64 },
     LocationClear,
+    WallpaperSetup(bool),
+    /// A 1920×1080 JPEG from the phone page.
+    WallpaperUploaded(Vec<u8>),
 }
 
 pub const TIVIONE_APP: &str = "com.tivione.tv";
@@ -394,6 +405,76 @@ pub fn tivione_from_apps(reply: &Value) -> Option<Installed> {
     })
 }
 
+/// Wallpapers are 1920×1080 RGB; the blurred copy (for the frosted dock) is a quarter of that.
+pub const WALLPAPER: (usize, usize) = (1920, 1080);
+pub const WALLPAPER_BLUR: (usize, usize) = (480, 270);
+
+pub struct Wallpaper {
+    pub rgb: Vec<u8>,
+    pub blur: Vec<u8>,
+}
+
+/// Decodes a 1920×1080 JPEG and prepares its blurred quarter-size copy (a few box-blur passes,
+/// once, so the dock never needs a real-time blur).
+pub fn decode_wallpaper(bytes: &[u8]) -> Result<Wallpaper, String> {
+    let mut decoder = jpeg_decoder::Decoder::new(bytes);
+    let pixels = decoder.decode().map_err(|e| e.to_string())?;
+    let info = decoder.info().ok_or("jpeg without info")?;
+    if (info.width as usize, info.height as usize) != WALLPAPER {
+        return Err(format!("wallpaper is {}x{}, not 1920x1080", info.width, info.height));
+    }
+    let rgb = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => pixels,
+        jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&g| [g, g, g]).collect(),
+        _ => return Err("unsupported jpeg format".into()),
+    };
+    let (w, h) = WALLPAPER;
+    let (bw, bh) = WALLPAPER_BLUR;
+    // 4×4 average down to a quarter, as floats for the blur passes.
+    let mut small = vec![0f32; bw * bh * 3];
+    for y in 0..bh {
+        for x in 0..bw {
+            for c in 0..3 {
+                let mut sum = 0u32;
+                for dy in 0..4 {
+                    for dx in 0..4 {
+                        sum += rgb[((y * 4 + dy) * w + x * 4 + dx) * 3 + c] as u32;
+                    }
+                }
+                small[(y * bw + x) * 3 + c] = sum as f32 / 16.0;
+            }
+        }
+    }
+    for _ in 0..3 {
+        box_blur(&mut small, bw, bh, 6, true);
+        box_blur(&mut small, bw, bh, 6, false);
+    }
+    let blur = small.iter().map(|v| v.round().clamp(0.0, 255.0) as u8).collect();
+    let _ = h;
+    Ok(Wallpaper { rgb, blur })
+}
+
+/// One running-sum box blur along rows (`horizontal`) or columns, edges clamped.
+fn box_blur(data: &mut [f32], w: usize, h: usize, radius: usize, horizontal: bool) {
+    let (lines, len) = if horizontal { (h, w) } else { (w, h) };
+    let at = |line: usize, i: usize| if horizontal { (line * w + i) * 3 } else { (i * w + line) * 3 };
+    let mut out = vec![0f32; len * 3];
+    let window = (2 * radius + 1) as f32;
+    for line in 0..lines {
+        for c in 0..3 {
+            let sample = |i: isize| data[at(line, i.clamp(0, len as isize - 1) as usize) + c];
+            let mut sum: f32 = (-(radius as isize)..=radius as isize).map(sample).sum();
+            for i in 0..len {
+                out[i * 3 + c] = sum / window;
+                sum += sample(i as isize + radius as isize + 1) - sample(i as isize - radius as isize);
+            }
+        }
+        for i in 0..len {
+            data[at(line, i)..at(line, i) + 3].copy_from_slice(&out[i * 3..i * 3 + 3]);
+        }
+    }
+}
+
 /// Dotted version comparison ("1.0.10" > "1.0.9"); missing parts count as 0.
 pub fn version_newer(a: &str, b: &str) -> bool {
     let parts = |v: &str| -> Vec<u64> { v.split('.').map(|p| p.trim().parse().unwrap_or(0)).collect() };
@@ -419,6 +500,8 @@ pub enum Request {
     Install(Release),
     /// Fetch and decode the store page's pictures.
     Pictures(Release),
+    /// Decode a wallpaper JPEG.
+    Wallpaper(std::path::PathBuf),
 }
 
 /// Normalises `listLaunchPoints` (LG's Home bar, already in the user's order), taking each

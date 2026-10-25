@@ -70,6 +70,8 @@ pub enum Action {
     Pictures(Release),
     /// Switch the look (fonts load first; the event loop then calls `set_look`).
     SetTheme(Look),
+    /// Load a Glass wallpaper: a bundled one by name, or `custom`.
+    Wallpaper(String),
     /// Start (Some) or stop (None) the live preview.
     Preview(Option<Stream>),
     Exit,
@@ -95,6 +97,7 @@ enum Service {
     TiviOne,
     HomeTiles,
     Weather,
+    Wallpaper,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -331,6 +334,9 @@ enum SettingId {
     TiviOneStore,
     /// The look: Cinematic or Glass.
     Theme,
+    /// Glass wallpaper, and sending a photo from the phone.
+    Wallpaper,
+    WallpaperUpload,
     /// The TiviOne tile on Home while TiviOne is missing.
     TiviOnePromo,
     Info,
@@ -383,6 +389,8 @@ pub struct Home {
     tilt_x: Spring,
     tilt_y: Spring,
     wiggle: f32,
+    /// Glass wallpaper and its blurred copy (for the dock), once loaded.
+    wallpaper: Option<(Texture, Texture)>,
     strings: &'static Strings,
     rails: [Rail; 9],
     active: usize,
@@ -456,6 +464,7 @@ impl Home {
             backdrop: None,
             previous_backdrop: None,
             backdrop_t: Spring::new(1.0, 8.0),
+            wallpaper: None,
             tilt_x: Spring::new(0.0, 7.0),
             tilt_y: Spring::new(0.0, 7.0),
             wiggle: 0.0,
@@ -523,6 +532,9 @@ impl Home {
         };
         home.apply_look();
         glass::upload_sheen(renderer, home.art_atlas);
+        if home.look == Look::Glass {
+            home.pending.push(Action::Wallpaper(home.prefs.ui.wallpaper.clone()));
+        }
         home
     }
 
@@ -537,6 +549,28 @@ impl Home {
         self.previous_backdrop = None;
         self.settle();
         self.refocus(true);
+        if look == Look::Glass && self.wallpaper.is_none() {
+            self.pending.push(Action::Wallpaper(self.prefs.ui.wallpaper.clone()));
+        }
+    }
+
+    /// Bundled wallpapers, then the phone photo when there is one.
+    fn wallpapers(&self) -> Vec<&'static str> {
+        let mut names = vec!["valley", "crete", "dunes"];
+        if self.status.wallpaper_custom {
+            names.push("custom");
+        }
+        names
+    }
+
+    fn wallpaper_name(&self, id: &str) -> &'static str {
+        let s = self.strings;
+        match id {
+            "crete" => s.wallpaper_names[1],
+            "dunes" => s.wallpaper_names[2],
+            "custom" => s.wallpaper_own,
+            _ => s.wallpaper_names[0],
+        }
     }
 
     /// The panel behind menus and dialogs, in the look's style.
@@ -573,8 +607,8 @@ impl Home {
                     card,
                     card,
                     card,
-                    (glass::TILE.0, 150.0, glass::ROW_GAP),
-                    (glass::TILE.0, 110.0, glass::ROW_GAP),
+                    (glass::TILE.0, 130.0, glass::ROW_GAP),
+                    (glass::TILE.0, 100.0, glass::ROW_GAP),
                     (glass::TILE.0, glass::TILE.1, glass::ROW_GAP),
                 ]
             }
@@ -862,6 +896,7 @@ impl Home {
                 Service::HomeAssistant => status.ha.is_some() && self.status.ha.is_none(),
                 Service::Plex => status.plex.is_some() && self.status.plex.is_none(),
                 Service::Weather => status.location.is_some() && status.location != self.status.location,
+                Service::Wallpaper => status.wallpaper_version != self.status.wallpaper_version,
                 Service::TiviOne | Service::HomeTiles => false,
             };
             if now_connected {
@@ -872,7 +907,14 @@ impl Home {
             .ha_setup
             .as_ref()
             .or(status.location_setup.as_ref())
+            .or(status.wallpaper_setup.as_ref())
             .and_then(|url| qrcodegen::QrCode::encode_text(url, qrcodegen::QrCodeEcc::Medium).ok().map(|qr| (url.clone(), qr)));
+        // A new photo from the phone becomes the wallpaper.
+        if status.wallpaper_version != self.status.wallpaper_version {
+            self.prefs.ui.wallpaper = "custom".into();
+            self.pending.push(Action::Wallpaper("custom".into()));
+            self.pending.push(Action::SavePrefs(self.prefs.clone()));
+        }
         self.status = status;
         self.settings = tiles;
         self.maybe_offer();
@@ -1436,12 +1478,19 @@ impl Home {
                 item(SettingId::Row(i), label, if shown { s.shown } else { s.row_hidden }.to_string(), Some(shown))
             })
             .collect();
-        let appearance = vec![
-            item(SettingId::Theme, s.theme, self.look.name().to_string(), None),
-            item(SettingId::Ambient, s.ambient_light, s.levels[ui.ambient.min(3) as usize].to_string(), None),
+        let mut appearance = vec![item(SettingId::Theme, s.theme, self.look.name().to_string(), None)];
+        if self.look == Look::Glass {
+            appearance.push(item(SettingId::Wallpaper, s.wallpaper, self.wallpaper_name(&ui.wallpaper).to_string(), None));
+            appearance.push(item(SettingId::WallpaperUpload, s.wallpaper_upload, String::new(), None));
+        }
+        // Ambient light belongs to Cinematic (Glass has its wallpaper).
+        if self.look == Look::Cinematic {
+            appearance.push(item(SettingId::Ambient, s.ambient_light, s.levels[ui.ambient.min(3) as usize].to_string(), None));
+        }
+        appearance.extend([
             item(SettingId::Motion, s.motion, if ui.reduced_motion { s.reduced } else { s.full }.to_string(), None),
             item(SettingId::Preview, s.live_preview, onoff(ui.preview), Some(ui.preview)),
-        ];
+        ]);
         let language = match crate::strings::LANGUAGES.iter().find(|(code, _, _)| *code == ui.language) {
             Some((_, name, _)) => name.to_string(),
             None => {
@@ -1537,6 +1586,19 @@ impl Home {
                 return action;
             }
             SettingId::TiviOnePromo => ui.tivione_promo = !ui.tivione_promo,
+            SettingId::Wallpaper => {
+                let names = self.wallpapers();
+                let at = names.iter().position(|n| *n == self.prefs.ui.wallpaper).unwrap_or(0);
+                let next = names[(at + 1) % names.len()];
+                self.prefs.ui.wallpaper = next.to_string();
+                self.pending.push(Action::Wallpaper(next.to_string()));
+                return Some(Action::SavePrefs(self.prefs.clone()));
+            }
+            SettingId::WallpaperUpload => {
+                self.mode = Mode::Setup { service: Service::Wallpaper, closing_at: None };
+                self.from_settings = true;
+                return Some(Action::Service(ServiceRequest::WallpaperSetup(true)));
+            }
             SettingId::Theme => {
                 let at = Look::ALL.iter().position(|&l| l == self.look).unwrap_or(0);
                 let next = Look::ALL[(at + 1) % Look::ALL.len()];
@@ -1780,6 +1842,7 @@ impl Home {
             Service::HomeAssistant => self.status.ha.is_some(),
             Service::Plex => self.status.plex.is_some(),
             Service::Weather => self.status.location.is_some(),
+            Service::Wallpaper => false,
             Service::TiviOne | Service::HomeTiles => false,
         };
         match key {
@@ -1789,6 +1852,7 @@ impl Home {
                     (Service::HomeAssistant, false) => Some(Action::Service(ServiceRequest::HaSetup(false))),
                     (Service::Plex, false) => Some(Action::Service(ServiceRequest::PlexLink(false))),
                     (Service::Weather, _) => Some(Action::Service(ServiceRequest::LocationSetup(false))),
+                    (Service::Wallpaper, _) => Some(Action::Service(ServiceRequest::WallpaperSetup(false))),
                     _ => None,
                 }
             }

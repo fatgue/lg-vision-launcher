@@ -107,6 +107,22 @@ impl Home {
                     text.draw_top(r, url, q.x + (side - w) * 0.5, q.y + side + 22.0, SETUP_SMALL, a(0.6));
                 }
             }
+            Service::Wallpaper => {
+                text.draw_top(r, s.wallpaper_title, x, y, SETUP_TITLE, a(1.0));
+                y += 96.0;
+                for (i, step) in s.wallpaper_steps.iter().enumerate() {
+                    text.draw_top(r, &format!("{}.", i + 1), x, y, SETUP_BODY, a(0.5));
+                    text.draw_top(r, step, x + 44.0, y, SETUP_BODY, a(0.85));
+                    y += 64.0;
+                }
+                if let Some((url, qr)) = &self.qr {
+                    let side = 380.0;
+                    let q = Rect::new(panel.x + panel.w - side - 64.0, panel.y + 64.0, side, side);
+                    draw_qr(r, qr, q, open);
+                    let w = text.measure(r, url, SETUP_SMALL);
+                    text.draw_top(r, url, q.x + (side - w) * 0.5, q.y + side + 22.0, SETUP_SMALL, a(0.6));
+                }
+            }
             Service::Plex | Service::TiviOne | Service::HomeTiles => {
                 if let Some(account) = &self.status.plex {
                     text.draw_top(r, s.plex, x, y, SETUP_TITLE, a(1.0));

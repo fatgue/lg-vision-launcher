@@ -52,6 +52,17 @@ impl Sink {
     }
 }
 
+/// Decodes a wallpaper on a thread of its own (a 1080p JPEG takes a while on the TV).
+fn load_wallpaper(path: PathBuf, sink: Sink) {
+    let _ = std::thread::Builder::new().name("wallpaper".into()).spawn(move || {
+        let image = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| crate::model::decode_wallpaper(&bytes));
+        if let Err(error) = &image {
+            log!("wallpaper {}: {error}", path.display());
+        }
+        sink.send(Update::Wallpaper(image.ok()));
+    });
+}
+
 fn save_prefs(prefs: &storage::Prefs, data_dir: &std::path::Path) {
     if let Err(error) = prefs.save(data_dir) {
         log!("prefs: {error}");
@@ -163,6 +174,7 @@ mod backend {
                 Request::SavePrefs(prefs) => save_prefs(&prefs, &data_dir),
                 Request::Install(release) => crate::installer::install(release, data_dir.clone(), sink.clone()),
                 Request::Pictures(release) => crate::installer::pictures(release, data_dir.clone(), sink.clone()),
+                Request::Wallpaper(path) => load_wallpaper(path, sink.clone()),
             }
         }
     }
@@ -220,6 +232,7 @@ mod backend {
                 Request::SavePrefs(prefs) => save_prefs(&prefs, &state.data_dir),
                 Request::Install(release) => crate::installer::install(release, state.data_dir.clone(), sink.clone()),
                 Request::Pictures(release) => crate::installer::pictures(release, state.data_dir.clone(), sink.clone()),
+                Request::Wallpaper(path) => load_wallpaper(path, sink.clone()),
                 Request::HomeTakeover(on) => {
                     // As root through Homebrew Channel; while Vision is Home, disabling ends
                     // this very process (LG Home takes over), enabling restarts it as Home.

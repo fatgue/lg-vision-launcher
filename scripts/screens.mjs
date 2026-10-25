@@ -31,9 +31,9 @@ const scenes = {
   'shelf-strip': 'right,right,up,right,right,right,right,right,right,right',
   move: 'hold,ok,down,right',
   bottom: 'down,down,down,down',
-  // Glass reaches Settings through its tile (last grid slot).
-  'tile-settings': 'down,right,right,right,right,ok',
-  'tile-settings-appearance': 'down,right,right,right,right,ok,down,down,down,down,down,right',
+  // Settings through the gear (Netflix has no Top Shelf, so Up reaches the gear in Glass too).
+  'gear-settings': 'right,up,ok',
+  'gear-settings-appearance': 'right,up,ok,down,down,down,down,down,right',
 };
 
 mkdirSync(out, { recursive: true });

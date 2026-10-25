@@ -1,12 +1,14 @@
-//! Remote navigation for the Glass look: the app grid (with the Settings tile last), the Top
-//! Shelf of the focused top-row app, and the rows under the grid.
+//! Remote navigation for the Glass look: the gear (Settings) at the top, the Top Shelf of the
+//! focused app in the dock, the app grid and the rows under it.
 use super::glass::COLS;
 use super::*;
 
 impl Home {
     pub(super) fn glass_browse_key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
         let before = (self.active, self.rails[self.active].focus, self.header);
-        let action = if self.header || self.active == FAVORITES {
+        let action = if self.header {
+            self.gear_key(key)
+        } else if self.active == FAVORITES {
             self.grid_key(key, home_mode)
         } else if self.in_shelf() {
             self.shelf_key(key)
@@ -28,14 +30,27 @@ impl Home {
         action
     }
 
-    /// Focuses grid slot `index`: an app, or the Settings tile after the last one.
     fn focus_grid(&mut self, index: usize) {
-        let apps = self.rails[FAVORITES].tiles.len();
         self.active = FAVORITES;
-        self.header = index >= apps;
-        if index < apps {
-            self.rails[FAVORITES].focus = index;
+        self.header = false;
+        self.rails[FAVORITES].focus = index.min(self.rails[FAVORITES].tiles.len().saturating_sub(1));
+    }
+
+    /// The gear at the top left: OK opens Settings, Down returns to the dock.
+    fn gear_key(&mut self, key: Key) -> Option<Action> {
+        match key {
+            Key::Ok => {
+                self.mode = Mode::Settings;
+                self.settings_column = 0;
+                self.ip = crate::net::local_ip();
+            }
+            Key::Down | Key::Back => {
+                self.header = false;
+                self.active = FAVORITES;
+            }
+            _ => {}
         }
+        None
     }
 
     fn grid_key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
@@ -46,16 +61,17 @@ impl Home {
             Key::Left if column > 0 => self.focus_grid(index - 1),
             Key::Right if column + 1 < COLS && index + 1 < total => self.focus_grid(index + 1),
             Key::Up if index >= COLS => self.focus_grid(index - COLS),
-            // From the top row into the app's Top Shelf content, if it has any.
-            Key::Up => {
-                if let Some(&rail) = self.shelf_rails().iter().find(|&&r| self.has(r)) {
+            // From the dock into the app's Top Shelf content if it has any, else to the gear.
+            Key::Up => match self.shelf_rails().iter().find(|&&r| self.has(r)) {
+                Some(&rail) => {
                     self.active = rail;
                     self.rails[rail].focus = 0;
                 }
-            }
+                None => self.header = true,
+            },
             Key::Down if index + COLS < total => self.focus_grid(index + COLS),
             // A shorter last row: its last tile.
-            Key::Down if index / COLS < (total - 1) / COLS => self.focus_grid(total - 1),
+            Key::Down if total > 0 && index / COLS < (total - 1) / COLS => self.focus_grid(total - 1),
             Key::Down => {
                 let first = self.glass_rows().next();
                 if let Some(rail) = first {
@@ -63,13 +79,8 @@ impl Home {
                     self.focus_row(rail, x + glass::TILE.0 * 0.5);
                 }
             }
-            Key::Ok if self.header => {
-                self.mode = Mode::Settings;
-                self.settings_column = 0;
-                self.ip = crate::net::local_ip();
-            }
             Key::Ok => return self.activate(),
-            Key::LongOk if !self.header && !self.rails[FAVORITES].tiles.is_empty() => {
+            Key::LongOk if !self.rails[FAVORITES].tiles.is_empty() => {
                 self.mode = Mode::Menu(Menu { items: vec![MenuItem::Move, MenuItem::Hide, MenuItem::Cancel], focus: 0 });
             }
             Key::Back if index != 0 => self.focus_grid(0),
@@ -95,8 +106,12 @@ impl Home {
                 self.active = strip[at - 1];
                 self.rails[self.active].focus = self.rails[self.active].tiles.len().saturating_sub(1);
             }
-            // Back to the app (its focus never left it).
+            // Back to the app (its focus never left it); above the shelf is the gear.
             Key::Down | Key::Back => self.active = FAVORITES,
+            Key::Up => {
+                self.active = FAVORITES;
+                self.header = true;
+            }
             Key::Ok => return self.activate(),
             _ => {}
         }
@@ -116,9 +131,9 @@ impl Home {
             // Up from the first row: the grid's last row, at the nearest column.
             Key::Up => {
                 let x = self.row_center(rail, focus);
-                let column = ((x - SAFE_X) / (glass::TILE.0 + glass::GAP)).floor().clamp(0.0, (COLS - 1) as f32) as usize;
-                let last_row = (self.grid_total() - 1) / COLS;
-                self.focus_grid((last_row * COLS + column).min(self.grid_total() - 1));
+                let column = ((x - glass::X0) / (glass::TILE.0 + glass::GAP)).floor().clamp(0.0, (COLS - 1) as f32) as usize;
+                let last_row = self.grid_total().saturating_sub(1) / COLS;
+                self.focus_grid(last_row * COLS + column);
             }
             Key::Down if at + 1 < rows.len() => self.focus_row(rows[at + 1], self.row_center(rail, focus)),
             Key::Ok => return self.activate(),

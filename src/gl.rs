@@ -37,6 +37,7 @@ pub const TEXTURE_WRAP_T: Enum = 0x2803;
 pub const LINEAR: i32 = 0x2601;
 pub const CLAMP_TO_EDGE: i32 = 0x812F;
 pub const ALPHA: Enum = 0x1906;
+pub const RGB: Enum = 0x1907;
 pub const RGBA: Enum = 0x1908;
 pub const UNPACK_ALIGNMENT: Enum = 0x0CF5;
 pub const VENDOR: Enum = 0x1F00;

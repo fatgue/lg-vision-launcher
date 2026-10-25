@@ -1,58 +1,61 @@
-//! The Glass look, inspired by tvOS: a Top Shelf showing what the focused app offers, a
-//! five-column app grid with the Settings tile in its last slot, and rows (Home Assistant,
-//! inputs, hidden apps) below. Focus lifts a tile without a ring; only its title shows.
+//! The Glass look: a photo wallpaper, the first row of apps in a frosted dock, more rows
+//! below it, Settings behind the gear at the top left and a large clock at the top right.
+//! When TiviOne or Plex has focus in the dock, its content appears above the dock (the Top
+//! Shelf); Up opens it with programme details and the live preview.
 use super::cinematic::*;
 use super::*;
 
-pub(super) const COLS: usize = 5;
-pub(super) const TILE: (f32, f32) = (308.0, 185.0);
-/// Five tiles and four gaps fill the 1728 px between the safe margins.
-pub(super) const GAP: f32 = 47.0;
-pub(super) const CARD: (f32, f32) = (300.0, 169.0);
-pub(super) const CARD_GAP: f32 = 32.0;
+pub(super) const COLS: usize = 6;
+pub(super) const TILE: (f32, f32) = (255.0, 143.0);
+pub(super) const GAP: f32 = 48.0;
+pub(super) const CARD: (f32, f32) = (285.0, 160.0);
+pub(super) const CARD_GAP: f32 = 28.0;
 pub(super) const ROW_GAP: f32 = 40.0;
-const ROW_PITCH: f32 = 262.0;
-/// The grid's top row with the shelf closed; the shelf opens by sliding the grid down.
-const GRID_TOP: f32 = 640.0;
-const SHELF_SHIFT: f32 = 290.0;
-/// Where a focused row below the top settles while scrolling.
-const FOCUS_Y: f32 = 330.0;
-const SECTION_GAP: f32 = 64.0;
-const ROWS_TOP_GAP: f32 = 40.0;
+/// Left edge of the first column; six tiles and five gaps end at 1845.
+pub(super) const X0: f32 = 75.0;
+/// The dock holding the first row, and that row's top.
+const DOCK: Rect = Rect::new(25.0, 782.0, 1870.0, 218.0);
+const DOCK_RADIUS: f32 = 44.0;
+const ROW0_Y: f32 = 819.0;
+/// Rows after the first, below the dock.
+const LOWER_TOP: f32 = 1036.0;
+const ROW_PITCH: f32 = 200.0;
+/// Where a focused lower row settles while scrolling.
+const FOCUS_Y: f32 = 560.0;
+const ROWS_TOP_GAP: f32 = 30.0;
 const ROW_TITLE: f32 = 52.0;
-const ROW_SPACE: f32 = 80.0;
-const RADIUS: f32 = 12.0;
-const CARD_RADIUS: f32 = 10.0;
-const FOCUS_SCALE: f32 = 1.12;
-const CARD_FOCUS_SCALE: f32 = 1.08;
-/// The shelf's cards, closed and open.
-const CARDS_Y: (f32, f32) = (380.0, 660.0);
+const ROW_SPACE: f32 = 70.0;
+const RADIUS: f32 = 14.0;
+const CARD_RADIUS: f32 = 12.0;
+const FOCUS_SCALE: f32 = 1.18;
+const CARD_FOCUS_SCALE: f32 = 1.1;
+/// The shelf's cards sit just above the dock.
+const CARDS_Y: f32 = 600.0;
+const SECTION_GAP: f32 = 48.0;
+/// The gear (Settings) at the top left.
+const GEAR: (f32, f32) = (66.0, 60.0);
 const WHITE: Rgba = Rgba::hex(0xFFFFFF);
+const BLACK: Rgba = Rgba::hex(0x000000);
 
 impl Home {
     // ---- Geometry (shared by navigation, drawing and pointer hits) -------------------
 
-    /// The grid slot in focus: an app, or the Settings tile after the last app.
     pub(super) fn grid_index(&self) -> usize {
-        if self.header {
-            self.rails[FAVORITES].tiles.len()
-        } else {
-            self.rails[FAVORITES].focus
-        }
+        self.rails[FAVORITES].focus
     }
 
-    /// Apps plus the Settings tile.
     pub(super) fn grid_total(&self) -> usize {
-        self.rails[FAVORITES].tiles.len() + 1
+        self.rails[FAVORITES].tiles.len()
     }
 
     fn grid_rows(&self) -> usize {
-        self.grid_total().div_ceil(COLS)
+        self.grid_total().max(1).div_ceil(COLS)
     }
 
-    /// Top-left of a grid cell before scrolling.
+    /// Top-left of a grid cell before scrolling: row 0 sits in the dock, later rows below it.
     pub(super) fn grid_xy(col: f32, row: f32) -> (f32, f32) {
-        (SAFE_X + col * (TILE.0 + GAP), GRID_TOP + row * ROW_PITCH)
+        let y = if row <= 1.0 { ROW0_Y + row * (LOWER_TOP - ROW0_Y) } else { LOWER_TOP + (row - 1.0) * ROW_PITCH };
+        (X0 + col * (TILE.0 + GAP), y)
     }
 
     /// Rails shown as rows under the grid, top to bottom. While TiviOne is missing, its tile
@@ -63,7 +66,9 @@ impl Home {
 
     /// A row's title, before scrolling.
     pub(super) fn glass_row_top(&self, rail: usize) -> f32 {
-        let mut y = GRID_TOP + self.grid_rows() as f32 * ROW_PITCH + ROWS_TOP_GAP;
+        let last = Self::grid_xy(0.0, (self.grid_rows() - 1) as f32).1;
+        // Under the dock when the grid is a single row, else under the last row.
+        let mut y = if self.grid_rows() == 1 { DOCK.y + DOCK.h } else { last + TILE.1 } + ROWS_TOP_GAP;
         for r in self.glass_rows() {
             if r == rail {
                 return y;
@@ -77,11 +82,11 @@ impl Home {
     fn glass_content_bottom(&self) -> f32 {
         match self.glass_rows().last() {
             Some(rail) => self.glass_row_top(rail) + ROW_TITLE + self.rails[rail].tile_h,
-            None => GRID_TOP + self.grid_rows() as f32 * ROW_PITCH,
+            None => Self::grid_xy(0.0, (self.grid_rows() - 1) as f32).1 + TILE.1,
         }
     }
 
-    /// What the Top Shelf shows: the content rails of the focused app in the grid's top row.
+    /// What the Top Shelf shows: the content rails of the focused app in the dock.
     pub(super) fn shelf_rails(&self) -> &'static [usize] {
         let favorites = &self.rails[FAVORITES];
         if self.header || favorites.focus >= COLS {
@@ -108,7 +113,7 @@ impl Home {
 
     /// A card's x in the shelf strip, before shelf scrolling. Sections follow each other.
     pub(super) fn shelf_x(&self, rail: usize, index: usize) -> f32 {
-        let mut x = SAFE_X;
+        let mut x = X0;
         let mut first = true;
         for &r in self.shelf_rails() {
             if !self.has(r) {
@@ -133,9 +138,9 @@ impl Home {
     }
 
     pub(super) fn glass_menu_anchor(&self) -> (f32, f32) {
-        let dy = self.vscroll.value + self.shelf.value * SHELF_SHIFT;
+        let dy = self.vscroll.value;
         if self.active == FAVORITES {
-            let tile = &self.rails[FAVORITES].tiles.get(self.rails[FAVORITES].focus);
+            let tile = self.rails[FAVORITES].tiles.get(self.rails[FAVORITES].focus);
             let (col, row) = tile.map_or((0.0, 0.0), |t| (t.gcol.value, t.grow.value));
             let (x, y) = Self::grid_xy(col, row);
             return (x, y + dy - TILE.1 * (FOCUS_SCALE - 1.0) * 0.5);
@@ -150,13 +155,11 @@ impl Home {
         let in_shelf = self.in_shelf();
         self.shelf.target = if in_shelf { 1.0 } else { 0.0 };
         self.settings_focus.target = if self.header { 1.0 } else { 0.0 };
-        let in_grid = self.header || self.active == FAVORITES;
-        self.vscroll.target = if in_shelf {
-            0.0
-        } else if in_grid {
+        let in_grid = self.header || self.active == FAVORITES || in_shelf;
+        self.vscroll.target = if in_grid {
             match self.grid_index() / COLS {
-                0 => 0.0,
-                row => FOCUS_Y - (GRID_TOP + row as f32 * ROW_PITCH),
+                row if row == 0 || self.header || in_shelf => 0.0,
+                row => FOCUS_Y - Self::grid_xy(0.0, row as f32).1,
             }
         } else {
             FOCUS_Y - self.glass_row_top(self.active)
@@ -165,28 +168,25 @@ impl Home {
         let end = (LOGICAL_H - 60.0 - self.glass_content_bottom()).min(0.0);
         self.vscroll.target = self.vscroll.target.max(end);
         if in_shelf {
-            // Keep the focused card inside the safe area.
+            // Keep the focused card inside the screen.
             let x = self.shelf_x(self.active, self.rails[self.active].focus);
             let left = x - self.shelf_scroll.target;
-            if left < SAFE_X {
-                self.shelf_scroll.target = x - SAFE_X;
-            } else if left + CARD.0 > LOGICAL_W - SAFE_X {
-                self.shelf_scroll.target = x + CARD.0 - (LOGICAL_W - SAFE_X);
+            if left < X0 {
+                self.shelf_scroll.target = x - X0;
+            } else if left + CARD.0 > LOGICAL_W - X0 {
+                self.shelf_scroll.target = x + CARD.0 - (LOGICAL_W - X0);
             }
             self.shelf_scroll.target = self.shelf_scroll.target.max(0.0);
         }
-        // The backdrop follows the focused app (crossfading); the Settings tile has none.
+        // Another app's shelf starts at its first card.
         let favorites = &self.rails[FAVORITES];
-        let app = (!self.header).then(|| favorites.tiles.get(favorites.focus).map(|t| t.id.clone())).flatten();
+        let app = favorites.tiles.get(favorites.focus).map(|t| t.id.clone());
         if app != self.backdrop {
-            self.previous_backdrop = std::mem::replace(&mut self.backdrop, app);
-            self.backdrop_t = Spring::new(0.0, 8.0);
-            self.backdrop_t.target = 1.0;
-            // Another app's shelf starts at its first card.
+            self.backdrop = app;
             self.shelf_scroll = Spring::new(0.0, 16.0);
         }
         if instant {
-            for spring in [&mut self.shelf, &mut self.shelf_scroll, &mut self.settings_focus, &mut self.backdrop_t] {
+            for spring in [&mut self.shelf, &mut self.shelf_scroll, &mut self.settings_focus] {
                 spring.snap();
             }
         }
@@ -219,18 +219,32 @@ impl Home {
         }
     }
 
+    /// Takes a decoded wallpaper: two textures, created on first use and refilled after.
+    pub fn set_wallpaper(&mut self, wallpaper: Option<crate::model::Wallpaper>, renderer: &Renderer) {
+        let Some(wallpaper) = wallpaper else { return };
+        let (w, h) = crate::model::WALLPAPER;
+        let (bw, bh) = crate::model::WALLPAPER_BLUR;
+        let (full, blur) = *self
+            .wallpaper
+            .get_or_insert_with(|| (renderer.create_texture(w as i32, h as i32, gl::RGB), renderer.create_texture(bw as i32, bh as i32, gl::RGB)));
+        renderer.upload(full, 0, 0, w as i32, h as i32, gl::RGB, &wallpaper.rgb);
+        renderer.upload(blur, 0, 0, bw as i32, bh as i32, gl::RGB, &wallpaper.blur);
+        self.backdrop_t = Spring::new(0.0, 6.0);
+        self.backdrop_t.target = 1.0;
+    }
+
     // ---- Drawing ---------------------------------------------------------------------
 
     pub(super) fn draw_glass(&mut self, r: &mut Renderer, text: &mut Text, now: &chrono::DateTime<chrono::Local>) {
         self.hits.borrow_mut().clear();
         let (clock, date) = self.clock_and_date(now);
+        let v = self.vscroll.value;
         let open = self.shelf.value.clamp(0.0, 1.0);
-        // The shelf scrolls away with the grid as lower rows take focus.
-        let fade = (1.0 + self.vscroll.value / 420.0).clamp(0.0, 1.0);
-        let dy = self.vscroll.value + open * SHELF_SHIFT;
-        self.glass_backdrop(r, fade, open);
+        // The header and the shelf scroll away as lower rows take focus.
+        let fade = (1.0 + v / 360.0).clamp(0.0, 1.0);
+        self.glass_wallpaper(r, fade, open);
         if fade > 0.01 {
-            self.glass_shelf(r, text, fade, open);
+            self.glass_shelf(r, text, fade);
         }
         if self.preview.is_some() {
             r.punch(PREVIEW_RECT);
@@ -241,12 +255,13 @@ impl Home {
         if open > 0.01 && fade > 0.01 {
             if let Some(hero) = &self.hero {
                 let t = self.hero_t.value.clamp(0.0, 1.0);
-                draw_hero_block(r, text, hero, open * fade * t, -60.0, WHITE, PREVIEW_RECT.x - SAFE_X - 40.0);
+                draw_hero_block(r, text, hero, open * fade * t, -60.0, WHITE, PREVIEW_RECT.x - X0 - 40.0);
             }
         }
         self.glass_header(r, text, &clock, &date, fade);
-        self.glass_grid(r, text, dy);
-        self.glass_row_tiles(r, text, dy);
+        self.glass_dock(r, v);
+        self.glass_grid(r, text, v);
+        self.glass_row_tiles(r, text, v);
         self.draw_menu(r, text);
         self.draw_setup(r, text);
         self.draw_offer(r, text);
@@ -257,79 +272,90 @@ impl Home {
         self.draw_notice(r, text);
     }
 
-    /// The focused app's artwork across the top, crossfading between apps and fading into the
-    /// background; darker while the shelf is open, so its text and video read.
-    fn glass_backdrop(&self, r: &mut Renderer, fade: f32, open: f32) {
-        if fade <= 0.01 {
-            return;
+    /// The photo, darkened as lower rows scroll up and behind the shelf's content.
+    fn glass_wallpaper(&self, r: &mut Renderer, fade: f32, open: f32) {
+        let screen = Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H);
+        match self.wallpaper {
+            Some((full, _)) => r.image(full, screen, [0.0, 0.0, 1.0, 1.0], 0.0, WHITE.alpha(self.backdrop_t.value.clamp(0.0, 1.0))),
+            None => r.vgradient(screen, Rgba::hex(0x1B2330), GLASS_BG),
         }
-        let area = Rect::new(0.0, 0.0, LOGICAL_W, 780.0);
-        let t = self.backdrop_t.value.clamp(0.0, 1.0);
-        for (id, weight) in [(&self.previous_backdrop, 1.0 - t), (&self.backdrop, t)] {
-            let Some(id) = id else { continue };
-            let alpha = weight * fade;
-            if alpha <= 0.01 {
-                continue;
-            }
-            match self.arts.get(id) {
-                Some((_, [u0, v0, u1, v1])) => {
-                    // Full width; the 16:9 artwork is cropped to the band's height.
-                    let keep = (16.0 / 9.0) / (area.w / area.h);
-                    let (mid, half) = ((v0 + v1) * 0.5, (v1 - v0) * keep * 0.5);
-                    r.image(self.art_atlas, area, [*u0, mid - half, *u1, mid + half], 0.0, WHITE.alpha(alpha));
-                }
-                None => {
-                    let color = self.rails[FAVORITES].tiles.iter().find(|t| &t.id == id).map_or(ACCENT_DEFAULT, |t| t.accent);
-                    r.radial(1250.0, 260.0, 1100.0, 620.0, color.alpha(0.5 * alpha));
-                }
-            }
+        // Legibility: the clock at the top, the shelf above the dock, the rows when scrolled.
+        r.vgradient(Rect::new(0.0, 0.0, LOGICAL_W, 200.0), BLACK.alpha(0.35), BLACK.alpha(0.0));
+        if !self.shelf_rails().is_empty() {
+            r.vgradient(Rect::new(0.0, 360.0, LOGICAL_W, 420.0), BLACK.alpha(0.0), BLACK.alpha(0.55 * fade));
         }
-        let bg = GLASS_BG;
-        r.vgradient(Rect::new(0.0, 0.0, LOGICAL_W, 220.0), bg.alpha(0.55 * fade), bg.alpha(0.0));
-        r.vgradient(Rect::new(0.0, 360.0, LOGICAL_W, 420.0), bg.alpha(0.0), bg);
-        if open > 0.01 {
-            r.rect(area, 0.0, bg.alpha(0.6 * open * fade));
+        let dim = 0.5 * open * fade + (1.0 - fade) * 0.6;
+        if dim > 0.0 {
+            r.rect(screen, 0.0, BLACK.alpha(dim));
         }
     }
 
-    /// Clock, date and weather at the top right; they scroll away with the shelf.
+    /// The gear (Settings) at the top left; the clock, date and weather at the top right.
     fn glass_header(&self, r: &mut Renderer, text: &mut Text, clock: &str, date: &str, fade: f32) {
         if fade <= 0.01 {
             return;
         }
-        let mut x = LOGICAL_W - SAFE_X - text.measure(r, clock, GLASS_CLOCK);
-        text.draw(r, clock, x, SAFE_TOP + 36.0, GLASS_CLOCK, WHITE.alpha(0.92 * fade));
+        let f = self.settings_focus.value.clamp(0.0, 1.0);
+        let (gx, gy) = GEAR;
+        if matches!(self.mode, Mode::Browse) {
+            self.hits.borrow_mut().push((Rect::new(gx - 36.0, gy - 36.0, 72.0, 72.0), Target::Gear));
+        }
+        if f > 0.01 {
+            r.rect(Rect::new(gx - 34.0, gy - 34.0, 68.0, 68.0), 34.0, WHITE.alpha(f * fade));
+        }
+        draw_gear_at(r, gx, gy, 1.3, WHITE.lerp(Rgba::hex(0x111114), f).alpha(fade));
+
+        let shadowed = |text: &mut Text, r: &mut Renderer, s: &str, x: f32, y: f32, style: Style, alpha: f32| {
+            text.draw(r, s, x, y + 2.0, style, BLACK.alpha(0.35 * alpha));
+            text.draw(r, s, x, y, style, WHITE.alpha(alpha));
+        };
+        let mut x = LOGICAL_W - 64.0 - text.measure(r, clock, GLASS_CLOCK);
+        shadowed(text, r, clock, x, 76.0, GLASS_CLOCK, fade);
         if !date.is_empty() {
-            x -= 32.0 + text.measure(r, date, HEADER);
-            text.draw(r, date, x, SAFE_TOP + 34.0, HEADER, WHITE.alpha(0.7 * fade));
+            x -= 30.0 + text.measure(r, date, HEADER);
+            shadowed(text, r, date, x, 72.0, HEADER, 0.85 * fade);
         }
         if let Some(weather) = self.weather.filter(|_| self.prefs.ui.weather) {
             let temperature = if self.prefs.ui.fahrenheit { weather.temperature * 9.0 / 5.0 + 32.0 } else { weather.temperature };
             let label = format!("{temperature:.0}° · {}", self.strings.weather(weather.code));
-            x -= 32.0 + text.measure(r, &label, HEADER);
-            text.draw(r, &label, x, SAFE_TOP + 34.0, HEADER, WHITE.alpha(0.7 * fade));
+            x -= 30.0 + text.measure(r, &label, HEADER);
+            shadowed(text, r, &label, x, 72.0, HEADER, 0.85 * fade);
         }
     }
 
-    /// The focused app's Top Shelf content: section titles over cards in one strip.
-    fn glass_shelf(&self, r: &mut Renderer, text: &mut Text, fade: f32, open: f32) {
+    /// Frosted glass: the blurred copy of the wallpaper behind the dock, lightly tinted.
+    fn glass_dock(&self, r: &mut Renderer, dy: f32) {
+        let dock = DOCK.offset(0.0, dy);
+        if dock.y > LOGICAL_H || dock.y + dock.h < 0.0 {
+            return;
+        }
+        r.shadow(dock.offset(0.0, 12.0), DOCK_RADIUS, 40.0, BLACK.alpha(0.25));
+        if let Some((_, blur)) = self.wallpaper {
+            let uv = [dock.x / LOGICAL_W, dock.y / LOGICAL_H, (dock.x + dock.w) / LOGICAL_W, (dock.y + dock.h) / LOGICAL_H];
+            r.image(blur, dock, uv, DOCK_RADIUS, WHITE.alpha(self.backdrop_t.value.clamp(0.0, 1.0)));
+        }
+        r.rect(dock, DOCK_RADIUS, WHITE.alpha(0.14));
+        r.stroke(dock.inflate(-0.75), DOCK_RADIUS, 1.5, WHITE.alpha(0.3));
+    }
+
+    /// The focused app's shelf content: section titles over cards, just above the dock.
+    fn glass_shelf(&self, r: &mut Renderer, text: &mut Text, fade: f32) {
         let rails = self.shelf_rails();
         if rails.is_empty() {
             return;
         }
-        let cards_y = CARDS_Y.0 + (CARDS_Y.1 - CARDS_Y.0) * open + self.vscroll.value;
+        let cards_y = CARDS_Y + self.vscroll.value;
         let browse = matches!(self.mode, Mode::Browse);
         for pass in 0..4 {
             for &rail in rails {
                 if !self.has(rail) {
                     continue;
                 }
-                let tiles = &self.rails[rail].tiles;
                 if pass == 3 {
                     let x = self.shelf_x(rail, 0) - self.shelf_scroll.value;
-                    text.draw_top(r, self.rail_title(rail), x, cards_y - 46.0, GLASS_LABEL, WHITE.alpha(0.8 * fade));
+                    text.draw_top(r, self.rail_title(rail), x, cards_y - 42.0, GLASS_LABEL, WHITE.alpha(0.85 * fade));
                 }
-                for (i, tile) in tiles.iter().enumerate() {
+                for (i, tile) in self.rails[rail].tiles.iter().enumerate() {
                     let x = self.shelf_x(rail, i) - self.shelf_scroll.value;
                     if x > LOGICAL_W || x + CARD.0 < -40.0 {
                         continue;
@@ -349,7 +375,6 @@ impl Home {
         let favorites = &self.rails[FAVORITES];
         let browse = matches!(self.mode, Mode::Browse);
         let lift = self.lift.value.clamp(0.0, 1.0);
-        let n = favorites.tiles.len();
         for pass in 0..4 {
             for (i, tile) in favorites.tiles.iter().enumerate() {
                 let (x, y) = Self::grid_xy(tile.gcol.value, tile.grow.value);
@@ -357,49 +382,15 @@ impl Home {
                 if base.y > LOGICAL_H || base.y + base.h < -80.0 {
                     continue;
                 }
-                let f = tile.focus.value.clamp(0.0, 1.0);
-                let lifted = if i == favorites.focus { lift } else { 0.0 };
-                let rect = base.scale_about(1.0 + (FOCUS_SCALE - 1.0) * f.max(lifted), 0.5, 0.5);
+                let f = tile.focus.value.clamp(0.0, 1.0).max(if i == favorites.focus { lift } else { 0.0 });
+                let rect = base.scale_about(1.0 + (FOCUS_SCALE - 1.0) * f, 0.5, 0.5);
                 if pass == 0 && browse {
                     self.hits.borrow_mut().push((rect, Target::Tile { rail: FAVORITES, index: i }));
                 }
                 self.wiggle_tile(r, rect, i);
-                self.glass_tile(r, text, pass, tile, rect, f.max(lifted), 1.0, RADIUS);
+                self.glass_tile(r, text, pass, tile, rect, f, 1.0, RADIUS);
                 r.set_rotation(None);
             }
-            // The Settings tile, in the slot after the last app.
-            let (x, y) = Self::grid_xy((n % COLS) as f32, (n / COLS) as f32);
-            let f = self.settings_focus.value.clamp(0.0, 1.0);
-            let rect = Rect::new(x, y + dy, TILE.0, TILE.1).scale_about(1.0 + (FOCUS_SCALE - 1.0) * f, 0.5, 0.5);
-            if rect.y > LOGICAL_H || rect.y + rect.h < -80.0 {
-                continue;
-            }
-            self.wiggle_tile(r, rect, n);
-            match pass {
-                0 => {
-                    if browse {
-                        self.hits.borrow_mut().push((rect, Target::Gear));
-                    }
-                    if f > 0.01 {
-                        r.shadow(rect.offset(0.0, 18.0 * f), RADIUS, 44.0, Rgba::hex(0).alpha(0.6 * f));
-                    }
-                    r.rect(rect, RADIUS, Rgba::hex(0x3C3C43));
-                    draw_gear_at(r, rect.x + rect.w * 0.5, rect.y + rect.h * 0.5, 2.6 * rect.h / TILE.1, Rgba::hex(0xE6E6EA));
-                }
-                // A soft light from above, brighter (and following the tilt) when focused.
-                1 => {
-                    let (tx, ty) = (self.tilt_x.value * f, self.tilt_y.value * f);
-                    let uv = sheen_uv(rect, 0.5 + 0.3 * tx, 0.1 + 0.3 * ty);
-                    r.image(self.art_atlas, rect, uv, RADIUS, WHITE.alpha(0.14 + 0.12 * f));
-                }
-                3 if f > 0.01 => {
-                    let label = self.strings.settings;
-                    let w = text.measure(r, label, GLASS_LABEL);
-                    text.draw_top(r, label, rect.x + (rect.w - w) * 0.5, rect.y + rect.h + 16.0, GLASS_LABEL, WHITE.alpha(f));
-                }
-                _ => {}
-            }
-            r.set_rotation(None);
         }
     }
 
@@ -421,8 +412,9 @@ impl Home {
                     continue;
                 }
                 if pass == 3 {
-                    let dim = if rail == self.active { 0.9 } else { 0.6 };
-                    text.draw_top(r, self.rail_title(rail), SAFE_X, top, GLASS_SECTION, WHITE.alpha(dim));
+                    let dim = if rail == self.active { 0.95 } else { 0.7 };
+                    text.draw_top(r, self.rail_title(rail), X0, top + 2.0, GLASS_SECTION, BLACK.alpha(0.35 * dim));
+                    text.draw_top(r, self.rail_title(rail), X0, top, GLASS_SECTION, WHITE.alpha(dim));
                 }
                 let row = &self.rails[rail];
                 for (i, tile) in row.tiles.iter().enumerate() {
@@ -442,11 +434,12 @@ impl Home {
     }
 
     /// One tile in one pass (shapes → artwork → icons → text keeps texture switches low).
+    /// Focus: larger, a white frame and a soft shadow, the artwork shifting with the tilt and
+    /// a highlight sweeping across.
     #[allow(clippy::too_many_arguments)]
     fn glass_tile(&self, r: &mut Renderer, text: &mut Text, pass: usize, tile: &Tile, rect: Rect, f: f32, alpha: f32, radius: f32) {
         let view = TileView {
             now: if pass == 3 { self.channel_now(tile) } else { None },
-
             rect,
             f,
             alpha,
@@ -457,13 +450,11 @@ impl Home {
             radius,
             ring: false,
         };
-        // Parallax on the focused tile: the shadow falls away from the tilt, the artwork shifts
-        // inside its frame and a highlight sweeps across.
         let (tx, ty) = (self.tilt_x.value * f, self.tilt_y.value * f);
         match pass {
             0 => {
                 if f > 0.01 {
-                    r.shadow(rect.offset(-10.0 * tx, 18.0 * f - 6.0 * ty), radius, 44.0, Rgba::hex(0).alpha(0.6 * f * alpha));
+                    r.shadow(rect.offset(-10.0 * tx, 16.0 * f - 6.0 * ty), radius, 40.0, BLACK.alpha(0.55 * f * alpha));
                 }
                 draw_tile_shapes(r, tile, &view);
             }
@@ -478,19 +469,12 @@ impl Home {
                     _ => draw_tile_art(r, self.art_atlas, &view),
                 }
                 if f > 0.01 {
-                    r.image(self.art_atlas, rect, sheen_uv(rect, 0.5 + 0.3 * tx, 0.3 + 0.3 * ty), radius, WHITE.alpha(0.2 * f * alpha));
+                    r.image(self.art_atlas, rect, sheen_uv(rect, 0.5 + 0.3 * tx, 0.3 + 0.3 * ty), radius, WHITE.alpha(0.18 * f * alpha));
+                    r.stroke(rect.inflate(1.5), radius + 1.5, 3.0, WHITE.alpha(f * alpha));
                 }
             }
             2 => draw_tile_icon(r, self.icon_atlas, &view),
-            _ => {
-                draw_tile_text(r, text, tile, &view, self.strings);
-                // Only the focused tile shows its title, under it.
-                if f > 0.01 && matches!(tile.kind, Kind::App | Kind::Media { .. }) {
-                    let title = clip(text, r, &tile.title, GLASS_LABEL, rect.w + 60.0);
-                    let w = text.measure(r, &title, GLASS_LABEL);
-                    text.draw_top(r, &title, rect.x + (rect.w - w) * 0.5, rect.y + rect.h + 16.0, GLASS_LABEL, WHITE.alpha(f * alpha));
-                }
-            }
+            _ => draw_tile_text(r, text, tile, &view, self.strings),
         }
     }
 }

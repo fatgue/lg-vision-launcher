@@ -33,10 +33,13 @@ Home Assistant tiles and inputs.
 
 ![Cinematic](docs/screenshots/cinematic-home.jpg)
 
-**Glass:** inspired by tvOS. The Top Shelf shows what the focused app offers (TiviOne channels with a
-live preview, Plex continue watching), apps sit in a five-column grid with a Settings tile, and
-focus lifts a tile with a soft parallax tilt and sheen instead of a ring. Apps wiggle while you move
-them. Glass uses the Inter typeface; it contains no Apple assets.
+**Glass:** a photo wallpaper with the first row of apps in a frosted dock and more rows below it,
+the gear for Settings at the top left and a large clock at the top right. Focus enlarges a tile with
+a white frame, a soft sheen and a slight parallax tilt; apps wiggle while you move them. When TiviOne
+or Plex has focus in the dock, its channels or "continue watching" appear above the dock, and Up
+opens them with programme details and the live preview. Three wallpapers come with Vision, or send
+your own photo from your phone (**Settings → Appearance → Photo from your phone**). Glass uses the
+Inter typeface.
 
 | | |
 |---|---|
@@ -94,13 +97,13 @@ features; Vision only shows what TiviOne shares with it, and only after you agre
 - **Left / Right / Up / Down** move the focus; **OK** opens the app, input or channel.
 - **Hold OK** on a favourite: **Move** (Left / Right, OK to finish, Back to cancel) or **Hide**.
   Hidden apps have their own row at the bottom; hold OK there to show them again.
-- **Settings:** in Cinematic press **Up** from the top row or click the gear at the top right; in Glass open the Settings tile at the end of the app grid.
+- **Settings:** press **Up** from the top row (or click the gear); in Glass the gear sits at the top left.
   - Connections: Home Assistant, Home tiles, Plex, TiviOne
   - Weather: show or hide, location (from Home Assistant or a city entered on the phone), °C / °F
   - Clock: 24- or 12-hour, date
   - Home button: Vision as Home on or off
   - Rows: show or hide each row
-  - Appearance: theme, ambient light, motion, live preview
+  - Appearance: theme, wallpaper and a photo from your phone (Glass), ambient light (Cinematic), motion, live preview
   - System: language, reload app images, version
 
 ## Vision as Home
@@ -177,5 +180,5 @@ Vision is released under the [MIT licence](LICENSE). Not affiliated with LG Elec
 - SDL2 / SDL-webOS: zlib licence (`licenses/SDL2.txt` in the IPK)
 - Outfit (typeface): SIL Open Font License 1.1 (`assets/fonts/OFL.txt`)
 - Inter (typeface, Glass): SIL Open Font License 1.1 (`assets/fonts/Inter-OFL.txt`), subset to Latin
-- tvOS is a trademark of Apple Inc. Vision is not affiliated with Apple; the Glass look only takes inspiration from its layout.
+- Wallpapers: CC0 photos from Wikimedia Commons (`assets/wallpapers/CREDITS.txt`)
 - The Home takeover follows the approach of [Luma](https://github.com/ecklf/lg-luma) (MIT); no code was copied.

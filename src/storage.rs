@@ -48,6 +48,8 @@ pub struct UiPrefs {
     pub tivione_promo: bool,
     /// The look (`theme::Look::id`).
     pub theme: String,
+    /// Glass wallpaper: a bundled one (`valley`, `crete`, `dunes`) or `custom` (from the phone).
+    pub wallpaper: String,
 }
 
 impl Default for UiPrefs {
@@ -64,6 +66,7 @@ impl Default for UiPrefs {
             language: String::new(),
             tivione_promo: true,
             theme: "cinematic".into(),
+            wallpaper: "valley".into(),
         }
     }
 }
@@ -102,6 +105,7 @@ impl Prefs {
             language: ui.and_then(|u| u.get("language")).and_then(Value::as_str).unwrap_or_default().to_string(),
             tivione_promo: flag("tivionePromo", defaults.tivione_promo),
             theme: ui.and_then(|u| u.get("theme")).and_then(Value::as_str).unwrap_or(&defaults.theme).to_string(),
+            wallpaper: ui.and_then(|u| u.get("wallpaper")).and_then(Value::as_str).unwrap_or(&defaults.wallpaper).to_string(),
         };
         Self { order: list("order"), hidden: list("hidden"), ui }
     }
@@ -127,6 +131,7 @@ impl Prefs {
                 "language": ui.language,
                 "tivionePromo": ui.tivione_promo,
                 "theme": ui.theme,
+                "wallpaper": ui.wallpaper,
             },
         });
         std::fs::write(&temp, serde_json::to_vec_pretty(&body).unwrap_or_default())?;

@@ -38,6 +38,10 @@ const files = [
 for (const font of readdirSync(join(root, 'assets', 'fonts')).filter((f) => f.endsWith('.ttf'))) {
   files.push([`${appDir}/assets/fonts/${font}`, join(root, 'assets', 'fonts', font), 0o644]);
 }
+for (const wallpaper of readdirSync(join(root, 'assets', 'wallpapers')).filter((f) => f.endsWith('.jpg'))) {
+  files.push([`${appDir}/assets/wallpapers/${wallpaper}`, join(root, 'assets', 'wallpapers', wallpaper), 0o644]);
+}
+files.push([`${appDir}/licenses/wallpapers.txt`, join(root, 'assets', 'wallpapers', 'CREDITS.txt'), 0o644]);
 
 function tarHeader(name, size, mode, type) {
   const h = Buffer.alloc(512);

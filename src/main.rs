@@ -213,7 +213,7 @@ fn run(started: Instant) -> Result<(), String> {
         &data_dir,
         bus,
     );
-    let io = Io { platform: &platform, services: &services, home_mode, video: &preview };
+    let io = Io { platform: &platform, services: &services, home_mode, video: &preview, wallpapers: assets.join("wallpapers"), data_dir: data_dir.clone() };
     let ms = |d: Duration| d.as_millis();
     log!(
         "init: {} ms (prefs {}, sdl {}, window+gl {}, glyphs {}, home {}, register+workers {})",
@@ -421,6 +421,7 @@ fn run(started: Instant) -> Result<(), String> {
                 Update::Release(release) => home.set_release(release),
                 Update::Install(state) => home.set_install(state),
                 Update::Picture(picture) => home.add_picture(picture, &renderer),
+                Update::Wallpaper(image) => home.set_wallpaper(image, &renderer),
                 Update::TvPair(key) => platform.send(Request::Launch {
                     app_id: model::TIVIONE_APP.into(),
                     params: Some(serde_json::json!({ "launcherPair": { "key": key } })),
@@ -518,6 +519,9 @@ struct Io<'a> {
     services: &'a Services,
     home_mode: bool,
     video: &'a video::Video,
+    /// Bundled wallpapers, and the data directory (a phone photo is `wallpaper.jpg` there).
+    wallpapers: PathBuf,
+    data_dir: PathBuf,
 }
 
 /// Feeds a key to the home screen and dispatches the resulting action. Returns true to quit.
@@ -550,6 +554,13 @@ fn dispatch(action: Action, io: &Io) -> bool {
             platform.send(Request::Install(release));
         }
         Some(Action::Pictures(release)) => platform.send(Request::Pictures(release)),
+        Some(Action::Wallpaper(name)) => {
+            let path = match name.as_str() {
+                "custom" => io.data_dir.join("wallpaper.jpg"),
+                name => io.wallpapers.join(format!("{name}.jpg")),
+            };
+            platform.send(Request::Wallpaper(path));
+        }
         // Handled by the event loop, which owns the fonts.
         Some(Action::SetTheme(_)) => {}
         // On the TV, Back on the first tile hands over to LG's Home and Vision stays resident,

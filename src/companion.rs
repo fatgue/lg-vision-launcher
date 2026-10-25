@@ -69,12 +69,14 @@ fn handle(mut stream: TcpStream, key: &str, requests: &Sender<ServiceRequest>) -
     let request_line = lines.next().unwrap_or_default();
     let mut parts = request_line.split_whitespace();
     let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/"));
+    // Forms are small; only the wallpaper upload carries a photo (the page sends ~1 MB).
+    let limit = if target.starts_with("/wallpaper") { 6 << 20 } else { 16 * 1024 };
     let length: usize = lines
         .filter_map(|line| line.split_once(':'))
         .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
         .and_then(|(_, value)| value.trim().parse().ok())
         .unwrap_or(0)
-        .min(16 * 1024);
+        .min(limit);
     while data.len() < header_end + length {
         let n = stream.read(&mut buffer)?;
         if n == 0 {
@@ -86,6 +88,17 @@ fn handle(mut stream: TcpStream, key: &str, requests: &Sender<ServiceRequest>) -
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
 
     match (method, path) {
+        ("GET", "/wallpaper") if net::form_field(query, "k").as_deref() == Some(key) => respond(&mut stream, "200 OK", &wallpaper_page(key)),
+        ("POST", "/wallpaper") if net::form_field(query, "k").as_deref() == Some(key) => {
+            let photo = data[header_end..].to_vec();
+            match crate::model::decode_wallpaper(&photo) {
+                Ok(_) => {
+                    let _ = requests.send(ServiceRequest::WallpaperUploaded(photo));
+                    respond(&mut stream, "200 OK", "ok")
+                }
+                Err(error) => respond(&mut stream, "400 Bad Request", &escape(&error)),
+            }
+        }
         ("GET", "/location") if net::form_field(query, "k").as_deref() == Some(key) => respond(&mut stream, "200 OK", &location_form(key, None)),
         ("POST", "/location") if net::form_field(&body, "k").as_deref() == Some(key) => {
             let city = net::form_field(&body, "city").unwrap_or_default();
@@ -162,6 +175,45 @@ fn location_form(key: &str, error: Option<&str>) -> String {
 <label>City or town<input name="city" placeholder="Hamburg" autocomplete="address-level2" required></label>
 <button type="submit">Save</button>
 </form>"#
+        ),
+    )
+}
+
+/// Picks a photo, crops it to 16:9 at 1920×1080 in the browser and sends it as JPEG, so the
+/// TV only ever receives a small, ready-sized picture.
+fn wallpaper_page(key: &str) -> String {
+    page(
+        "Wallpaper",
+        &format!(
+            r#"<h1>Wallpaper</h1>
+<p>Choose a photo. It is cropped to the TV's shape and sent to Vision.</p>
+<label>Photo<input type="file" id="file" accept="image/*"></label>
+<canvas id="view" width="1920" height="1080" style="display:none;width:100%;margin-top:18px;border-radius:12px"></canvas>
+<button id="send" disabled>Set as wallpaper</button>
+<p id="state"></p>
+<script>
+const file = document.getElementById('file'), view = document.getElementById('view');
+const send = document.getElementById('send'), state = document.getElementById('state');
+file.onchange = async () => {{
+  const picked = file.files[0];
+  if (!picked) return;
+  const image = await createImageBitmap(picked);
+  const scale = Math.max(1920 / image.width, 1080 / image.height);
+  const w = image.width * scale, h = image.height * scale;
+  view.getContext('2d').drawImage(image, (1920 - w) / 2, (1080 - h) / 2, w, h);
+  view.style.display = 'block';
+  send.disabled = false;
+}};
+send.onclick = () => {{
+  send.disabled = true;
+  state.textContent = 'Sending…';
+  view.toBlob(async (blob) => {{
+    const reply = await fetch('/wallpaper?k={key}', {{ method: 'POST', headers: {{ 'Content-Type': 'image/jpeg' }}, body: blob }});
+    state.textContent = reply.ok ? 'Done. You can close this page.' : 'The TV could not use this photo.';
+    send.disabled = false;
+  }}, 'image/jpeg', 0.88);
+}};
+</script>"#
         ),
     )
 }
