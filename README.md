@@ -21,6 +21,27 @@ Rust + SDL2 + a custom OpenGL ES 2 renderer, around 3 MB, no web view.
 - **TiviOne (optional):** with the TiviOne IPTV app installed and connected, Vision shows recent and favourite channels, catch-up, upcoming reminders and a muted live preview of the focused channel; the number keys tune channels.
 - **Six languages:** English, German, French, Spanish, Italian, Turkish (follows the TV, can be changed).
 - **Magic Remote:** point to focus, click to open, hold for options, wheel to step along a row.
+- **Two looks:** Cinematic and Glass (see below), switchable in Settings while Vision runs.
+
+## Themes
+
+A theme changes the whole home screen: layout, navigation, typography, focus effects and the
+settings screens, not just colours. Switch it in **Settings → Appearance → Theme**.
+
+**Cinematic:** a large title over ambient light from the focused tile, with rows of apps, channels,
+Home Assistant tiles and inputs.
+
+![Cinematic](docs/screenshots/cinematic-home.jpg)
+
+**Glass:** inspired by tvOS. The Top Shelf shows what the focused app offers (TiviOne channels with a
+live preview, Plex continue watching), apps sit in a five-column grid with a Settings tile, and
+focus lifts a tile with a soft parallax tilt and sheen instead of a ring. Apps wiggle while you move
+them. Glass uses the Inter typeface; it contains no Apple assets.
+
+| | |
+|---|---|
+| ![Glass home](docs/screenshots/glass-home.jpg) | ![Glass Top Shelf](docs/screenshots/glass-shelf.jpg) |
+| ![Glass settings](docs/screenshots/glass-settings.jpg) | ![Moving apps in Glass](docs/screenshots/glass-move.jpg) |
 
 ## Performance
 
@@ -73,13 +94,13 @@ features; Vision only shows what TiviOne shares with it, and only after you agre
 - **Left / Right / Up / Down** move the focus; **OK** opens the app, input or channel.
 - **Hold OK** on a favourite: **Move** (Left / Right, OK to finish, Back to cancel) or **Hide**.
   Hidden apps have their own row at the bottom; hold OK there to show them again.
-- **Settings:** press **Up** from the top row, or click the gear at the top right.
+- **Settings:** in Cinematic press **Up** from the top row or click the gear at the top right; in Glass open the Settings tile at the end of the app grid.
   - Connections: Home Assistant, Home tiles, Plex, TiviOne
   - Weather: show or hide, location (from Home Assistant or a city entered on the phone), °C / °F
   - Clock: 24- or 12-hour, date
   - Home button: Vision as Home on or off
   - Rows: show or hide each row
-  - Appearance: ambient light, motion, live preview
+  - Appearance: theme, ambient light, motion, live preview
   - System: language, reload app images, version
 
 ## Vision as Home
@@ -155,4 +176,6 @@ Vision is released under the [MIT licence](LICENSE). Not affiliated with LG Elec
 
 - SDL2 / SDL-webOS: zlib licence (`licenses/SDL2.txt` in the IPK)
 - Outfit (typeface): SIL Open Font License 1.1 (`assets/fonts/OFL.txt`)
+- Inter (typeface, Glass): SIL Open Font License 1.1 (`assets/fonts/Inter-OFL.txt`), subset to Latin
+- tvOS is a trademark of Apple Inc. Vision is not affiliated with Apple; the Glass look only takes inspiration from its layout.
 - The Home takeover follows the approach of [Luma](https://github.com/ecklf/lg-luma) (MIT); no code was copied.
