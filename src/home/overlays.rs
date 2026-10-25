@@ -1,5 +1,6 @@
 //! Overlays drawn over the home screen: menu, setup panels, offer, store page, settings,
 //! entity picker, digit entry and notices.
+use super::cinematic::draw_gear_at;
 use super::*;
 
 impl Home {
@@ -17,7 +18,7 @@ impl Home {
         let x = tile_x.clamp(SAFE_X, LOGICAL_W - SAFE_X - width);
         let y = above - height - 24.0 + 16.0 * (1.0 - open);
         let panel = Rect::new(x, y, width, height);
-        draw_panel(r, panel, open);
+        self.panel(r, panel, open);
         let row = |i: usize| Rect::new(x + pad, y + 64.0 + pad + i as f32 * row_h, width - 2.0 * pad, row_h - 8.0);
         for i in 0..menu.items.len() {
             self.hits.borrow_mut().push((row(i), Target::MenuItem(i)));
@@ -47,7 +48,7 @@ impl Home {
         let s = self.strings;
         r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(0.7 * open));
         let panel = Rect::new(310.0, 230.0 + 20.0 * (1.0 - open), 1300.0, 600.0);
-        draw_panel(r, panel, open);
+        self.panel(r, panel, open);
         let (x, mut y) = (panel.x + 64.0, panel.y + 64.0);
         let a = |v: f32| TEXT.alpha(v * open);
         match service {
@@ -148,7 +149,7 @@ impl Home {
         let lines = wrap(text, r, s.offer_body, SETUP_BODY, 800.0 - 112.0);
         let height = 140.0 + lines.len() as f32 * 42.0 + 48.0 + 64.0 + 52.0;
         let panel = Rect::new(560.0, (LOGICAL_H - height) * 0.5 + 20.0 * (1.0 - open), 800.0, height);
-        draw_panel(r, panel, open);
+        self.panel(r, panel, open);
         let x = panel.x + 56.0;
         text.draw_top(r, s.offer_title, x, panel.y + 52.0, SETUP_TITLE, TEXT.alpha(open));
         let mut y = panel.y + 140.0;
@@ -327,11 +328,14 @@ impl Home {
         if !matches!(self.mode, Mode::Settings) || open <= 0.01 {
             return;
         }
+        if self.look == Look::Glass {
+            return self.draw_settings_glass(r, text, open);
+        }
         let s = self.strings;
         let a = |v: f32| TEXT.alpha(v * open);
         r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(0.82 * open));
         let panel = Rect::new(210.0, 120.0 + 16.0 * (1.0 - open), 1500.0, 840.0);
-        draw_panel(r, panel, open);
+        self.panel(r, panel, open);
         let (x, y) = (panel.x + 56.0, panel.y + 48.0);
         text.draw_top(r, s.settings, x, y, SETUP_TITLE, a(1.0));
         let hint = if self.settings_column == 0 { s.settings_hint } else { s.settings_list_hint };
@@ -394,6 +398,71 @@ impl Home {
         }
     }
 
+    /// Settings like tvOS: full screen, a large symbol on the left, one list on the right that
+    /// shows the sections or, once one is opened, its items. The focused row turns white.
+    fn draw_settings_glass(&self, r: &mut Renderer, text: &mut Text, open: f32) {
+        let s = self.strings;
+        let white = Rgba::hex(0xFFFFFF);
+        let a = |v: f32| white.alpha(v * open);
+        r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, GLASS_BG.alpha(open));
+        let sections = self.settings_sections();
+        let Some((section, items)) = sections.get(self.settings_section) else { return };
+        let in_items = self.settings_column == 1;
+        // Left: the symbol and where we are.
+        let (cx, cy) = (500.0, 430.0 + 12.0 * (1.0 - open));
+        r.rect(Rect::new(cx - 150.0, cy - 150.0, 300.0, 300.0), 64.0, Rgba::hex(0x3C3C43).alpha(open));
+        draw_gear_at(r, cx, cy, 5.2, Rgba::hex(0xE6E6EA).alpha(open));
+        let title = if in_items { *section } else { s.settings };
+        let w = text.measure(r, title, SETUP_TITLE);
+        text.draw_top(r, title, cx - w * 0.5, cy + 200.0, SETUP_TITLE, a(1.0));
+        let hint = if in_items { s.settings_list_hint } else { s.settings_hint };
+        let w = text.measure(r, hint, SETUP_SMALL);
+        text.draw_top(r, hint, cx - w * 0.5, cy + 280.0, SETUP_SMALL, a(0.5));
+        // Right: the list.
+        let (x, width, row_h) = (1000.0, 824.0, 84.0);
+        let rows: Vec<(String, String, bool)> = if in_items {
+            items
+                .iter()
+                .map(|item| {
+                    let value = match item.on {
+                        Some(on) => if on { s.on } else { s.off }.to_string(),
+                        None => item.value.clone(),
+                    };
+                    (item.label.clone(), value, item.enabled)
+                })
+                .collect()
+        } else {
+            sections.iter().map(|(name, _)| (name.to_string(), String::new(), true)).collect()
+        };
+        let focus = if in_items { self.settings_row } else { self.settings_section };
+        let top = (LOGICAL_H - rows.len() as f32 * row_h).max(160.0) * 0.5 - 20.0;
+        for (i, (label, value, enabled)) in rows.iter().enumerate() {
+            let row = Rect::new(x, top + i as f32 * row_h, width, row_h - 12.0);
+            if *enabled {
+                let target = if in_items { Target::SettingsRow(i) } else { Target::SettingsSection(i) };
+                self.hits.borrow_mut().push((row, target));
+            }
+            let focused = i == focus;
+            let row = if focused { row.scale_about(1.03, 0.5, 0.5) } else { row };
+            if focused {
+                r.shadow(row.offset(0.0, 14.0), 16.0, 36.0, Rgba::hex(0).alpha(0.5 * open));
+                r.rect(row, 16.0, white.alpha(open));
+            }
+            let color = if focused { Rgba::hex(0x111114) } else { white };
+            let dim = if *enabled { 1.0 } else { 0.5 };
+            text.draw(r, label, row.x + 28.0, row.y + row.h * 0.5 + 10.0, MENU_ITEM, color.alpha(open * dim));
+            let value = if value.is_empty() && !in_items { "›".to_string() } else { clip(text, r, value, INPUT_LABEL, width * 0.45) };
+            let w = text.measure(r, &value, INPUT_LABEL);
+            text.draw(r, &value, row.x + row.w - 28.0 - w, row.y + row.h * 0.5 + 9.0, INPUT_LABEL, color.alpha(0.55 * open * dim));
+        }
+        if in_items && self.settings_section == 3 {
+            let y = top + rows.len() as f32 * row_h + 16.0;
+            for (i, line) in wrap(text, r, s.home_button_note, INPUT_SUB, width - 56.0).iter().enumerate() {
+                text.draw_top(r, line, x + 28.0, y + i as f32 * 30.0, INPUT_SUB, a(0.5));
+            }
+        }
+    }
+
     pub(super) fn draw_picker(&self, r: &mut Renderer, text: &mut Text) {
         let open = self.overlay.value.clamp(0.0, 1.0);
         let Mode::Picker(p) = &self.mode else { return };
@@ -404,7 +473,7 @@ impl Home {
         let a = |v: f32| TEXT.alpha(v * open);
         r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(0.82 * open));
         let panel = Rect::new(150.0, 90.0 + 16.0 * (1.0 - open), 1620.0, 900.0);
-        draw_panel(r, panel, open);
+        self.panel(r, panel, open);
         let (x, y) = (panel.x + 56.0, panel.y + 48.0);
         text.draw_top(r, s.home_tiles, x, y, SETUP_TITLE, a(1.0));
         let hint_w = text.measure(r, s.picker_hint, SETUP_SMALL);

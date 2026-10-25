@@ -28,6 +28,7 @@ const files = [
   [`${appDir}/lib/libSDL2-2.0.so.0`, join(root, 'third_party', 'sdl-webos', 'libSDL2-2.0.so.0'), 0o755],
   [`${appDir}/licenses/SDL2.txt`, join(root, 'third_party', 'sdl-webos', 'LICENSE-SDL2.txt'), 0o644],
   [`${appDir}/licenses/Outfit-OFL.txt`, join(root, 'assets', 'fonts', 'OFL.txt'), 0o644],
+  [`${appDir}/licenses/Inter-OFL.txt`, join(root, 'assets', 'fonts', 'Inter-OFL.txt'), 0o644],
   [
     `usr/palm/packages/${id}/packageinfo.json`,
     Buffer.from(JSON.stringify({ app: id, id, loc_name: appinfo.title, package_format_version: 2, vendor: appinfo.vendor, version }, null, 2)),

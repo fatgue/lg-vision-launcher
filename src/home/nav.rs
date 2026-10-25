@@ -5,13 +5,27 @@ use super::*;
 
 impl Home {
     pub(super) fn glass_browse_key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
-        if self.header || self.active == FAVORITES {
-            return self.grid_key(key, home_mode);
+        let before = (self.active, self.rails[self.active].focus, self.header);
+        let action = if self.header || self.active == FAVORITES {
+            self.grid_key(key, home_mode)
+        } else if self.in_shelf() {
+            self.shelf_key(key)
+        } else {
+            self.rows_key(key)
+        };
+        // A newly focused tile arrives tilted from the direction of travel and settles flat.
+        if (self.active, self.rails[self.active].focus, self.header) != before {
+            let (x, y) = match key {
+                Key::Left => (0.7, 0.0),
+                Key::Right => (-0.7, 0.0),
+                Key::Up => (0.0, 0.7),
+                Key::Down => (0.0, -0.7),
+                _ => (0.0, 0.0),
+            };
+            self.tilt_x = Spring::new(x, 7.0);
+            self.tilt_y = Spring::new(y, 7.0);
         }
-        if self.in_shelf() {
-            return self.shelf_key(key);
-        }
-        self.rows_key(key)
+        action
     }
 
     /// Focuses grid slot `index`: an app, or the Settings tile after the last one.

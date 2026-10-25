@@ -227,6 +227,7 @@ fn run(started: Instant) -> Result<(), String> {
     );
 
     let mut perf = Perf::default();
+    let mut theme_switch: Option<(theme::Look, std::thread::JoinHandle<Result<text::Prewarmed, String>>)> = None;
     let mut dirty = true;
     // Hidden windows never draw: a backgrounded surface can block eglSwapBuffers indefinitely.
     let mut visible = true;
@@ -448,9 +449,28 @@ fn run(started: Instant) -> Result<(), String> {
         let frame_start = Instant::now();
         let dt = options.fixed_dt.unwrap_or_else(|| frame_start.duration_since(last_frame).as_secs_f32().min(0.05));
         last_frame = frame_start;
-        animating = home.update(dt) || home.waiting();
+        animating = home.update(dt) || home.waiting() || theme_switch.is_some();
         while let Some(action) = home.take_action() {
+            if let Action::SetTheme(next) = action {
+                // Fonts and glyphs for the new look load in the background; the old look keeps
+                // drawing until they are ready.
+                let jobs = next.prewarm_jobs(strings::current());
+                theme_switch = Some((next, text::prewarm(assets.join("fonts"), next.fonts(), jobs, Some(data_dir.join(next.glyph_cache())))));
+                continue;
+            }
             dispatch(action, &io);
+        }
+        if theme_switch.as_ref().is_some_and(|(_, handle)| handle.is_finished()) {
+            if let Some((next, handle)) = theme_switch.take() {
+                match handle.join() {
+                    Ok(Ok(prewarmed)) => {
+                        text.rebuild(&renderer, prewarmed);
+                        home.set_look(next);
+                        log!("look: {}", next.id());
+                    }
+                    _ => log!("look: fonts for {} failed", next.id()),
+                }
+            }
         }
         dirty = false;
 
@@ -530,6 +550,8 @@ fn dispatch(action: Action, io: &Io) -> bool {
             platform.send(Request::Install(release));
         }
         Some(Action::Pictures(release)) => platform.send(Request::Pictures(release)),
+        // Handled by the event loop, which owns the fonts.
+        Some(Action::SetTheme(_)) => {}
         // On the TV, Back on the first tile hands over to LG's Home and Vision stays resident,
         // so the next launch is a warm relaunch instead of a cold start.
         Some(Action::Exit) if WEBOS => {

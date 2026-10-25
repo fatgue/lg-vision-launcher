@@ -156,6 +156,8 @@ pub struct Renderer {
     vbo: u32,
     vertices: Vec<Vertex>,
     bound: u32,
+    /// Rotation applied to the next quads' positions: centre x/y, cos, sin.
+    rotation: Option<[f32; 4]>,
     pub stats: FrameStats,
 }
 
@@ -229,6 +231,7 @@ impl Renderer {
             vbo: buffers[0],
             vertices: Vec::with_capacity(MAX_QUADS * 4),
             bound: 0,
+            rotation: None,
             stats: FrameStats::default(),
         })
     }
@@ -320,8 +323,17 @@ impl Renderer {
             (r.x + r.w, r.y + r.h, uv[2], uv[3], bottom),
         ];
         for (x, y, u, v, color) in corners {
+            // Only the position turns: `local` keeps the shape's own frame, so the SDF edge and
+            // its anti-aliasing stay exact.
+            let pos = match self.rotation {
+                Some([cx, cy, cos, sin]) => {
+                    let (dx, dy) = (x - cx, y - cy);
+                    [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos]
+                }
+                None => [x, y],
+            };
             self.vertices.push(Vertex {
-                pos: [x, y],
+                pos,
                 uv: [u, v],
                 local: [x - center.0, y - center.1],
                 params,
@@ -329,6 +341,11 @@ impl Renderer {
                 kind,
             });
         }
+    }
+
+    /// Turns everything drawn next by `angle` radians around (cx, cy); None stops.
+    pub fn set_rotation(&mut self, around: Option<(f32, f32, f32)>) {
+        self.rotation = around.map(|(cx, cy, angle)| [cx, cy, angle.cos(), angle.sin()]);
     }
 
     /// Anti-aliased filled rounded rectangle.

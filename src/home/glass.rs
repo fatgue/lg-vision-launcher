@@ -195,8 +195,12 @@ impl Home {
     /// Glass-only springs; returns true while any moves.
     pub(super) fn glass_step(&mut self, dt: f32) -> bool {
         let mut moving = false;
-        for spring in [&mut self.shelf, &mut self.shelf_scroll, &mut self.settings_focus, &mut self.backdrop_t] {
+        for spring in [&mut self.shelf, &mut self.shelf_scroll, &mut self.settings_focus, &mut self.backdrop_t, &mut self.tilt_x, &mut self.tilt_y] {
             moving |= spring.step(dt);
+        }
+        if matches!(self.mode, Mode::Move { .. }) {
+            self.wiggle += dt;
+            moving = true;
         }
         for tile in &mut self.rails[FAVORITES].tiles {
             moving |= tile.gcol.step(dt);
@@ -359,7 +363,9 @@ impl Home {
                 if pass == 0 && browse {
                     self.hits.borrow_mut().push((rect, Target::Tile { rail: FAVORITES, index: i }));
                 }
+                self.wiggle_tile(r, rect, i);
                 self.glass_tile(r, text, pass, tile, rect, f.max(lifted), 1.0, RADIUS);
+                r.set_rotation(None);
             }
             // The Settings tile, in the slot after the last app.
             let (x, y) = Self::grid_xy((n % COLS) as f32, (n / COLS) as f32);
@@ -368,6 +374,7 @@ impl Home {
             if rect.y > LOGICAL_H || rect.y + rect.h < -80.0 {
                 continue;
             }
+            self.wiggle_tile(r, rect, n);
             match pass {
                 0 => {
                     if browse {
@@ -376,9 +383,14 @@ impl Home {
                     if f > 0.01 {
                         r.shadow(rect.offset(0.0, 18.0 * f), RADIUS, 44.0, Rgba::hex(0).alpha(0.6 * f));
                     }
-                    r.vgradient(rect, Rgba::hex(0x5A5A62), Rgba::hex(0x2E2E34));
-                    r.stroke(rect.inflate(-0.5), RADIUS, 1.0, WHITE.alpha(0.08));
+                    r.rect(rect, RADIUS, Rgba::hex(0x3C3C43));
                     draw_gear_at(r, rect.x + rect.w * 0.5, rect.y + rect.h * 0.5, 2.6 * rect.h / TILE.1, Rgba::hex(0xE6E6EA));
+                }
+                // A soft light from above, brighter (and following the tilt) when focused.
+                1 => {
+                    let (tx, ty) = (self.tilt_x.value * f, self.tilt_y.value * f);
+                    let uv = sheen_uv(rect, 0.5 + 0.3 * tx, 0.1 + 0.3 * ty);
+                    r.image(self.art_atlas, rect, uv, RADIUS, WHITE.alpha(0.14 + 0.12 * f));
                 }
                 3 if f > 0.01 => {
                     let label = self.strings.settings;
@@ -387,6 +399,15 @@ impl Home {
                 }
                 _ => {}
             }
+            r.set_rotation(None);
+        }
+    }
+
+    /// While apps are being moved, every grid tile rocks a little, each out of step.
+    fn wiggle_tile(&self, r: &mut Renderer, rect: Rect, index: usize) {
+        if matches!(self.mode, Mode::Move { .. }) {
+            let angle = 0.024 * (self.wiggle * 15.0 + index as f32 * 1.7).sin();
+            r.set_rotation(Some((rect.x + rect.w * 0.5, rect.y + rect.h * 0.5, angle)));
         }
     }
 
@@ -425,6 +446,7 @@ impl Home {
     fn glass_tile(&self, r: &mut Renderer, text: &mut Text, pass: usize, tile: &Tile, rect: Rect, f: f32, alpha: f32, radius: f32) {
         let view = TileView {
             now: if pass == 3 { self.channel_now(tile) } else { None },
+
             rect,
             f,
             alpha,
@@ -435,14 +457,30 @@ impl Home {
             radius,
             ring: false,
         };
+        // Parallax on the focused tile: the shadow falls away from the tilt, the artwork shifts
+        // inside its frame and a highlight sweeps across.
+        let (tx, ty) = (self.tilt_x.value * f, self.tilt_y.value * f);
         match pass {
             0 => {
                 if f > 0.01 {
-                    r.shadow(rect.offset(0.0, 18.0 * f), radius, 44.0, Rgba::hex(0).alpha(0.6 * f * alpha));
+                    r.shadow(rect.offset(-10.0 * tx, 18.0 * f - 6.0 * ty), radius, 44.0, Rgba::hex(0).alpha(0.6 * f * alpha));
                 }
                 draw_tile_shapes(r, tile, &view);
             }
-            1 => draw_tile_art(r, self.art_atlas, &view),
+            1 => {
+                match view.art {
+                    Some([u0, v0, u1, v1]) if f > 0.01 => {
+                        let zoom = 1.0 + 0.06 * f;
+                        let (hw, hh) = ((u1 - u0) * 0.5 / zoom, (v1 - v0) * 0.5 / zoom);
+                        let (cu, cv) = ((u0 + u1) * 0.5 + tx * ((u1 - u0) * 0.5 - hw), (v0 + v1) * 0.5 + ty * ((v1 - v0) * 0.5 - hh));
+                        draw_tile_art(r, self.art_atlas, &TileView { art: Some([cu - hw, cv - hh, cu + hw, cv + hh]), ..view });
+                    }
+                    _ => draw_tile_art(r, self.art_atlas, &view),
+                }
+                if f > 0.01 {
+                    r.image(self.art_atlas, rect, sheen_uv(rect, 0.5 + 0.3 * tx, 0.3 + 0.3 * ty), radius, WHITE.alpha(0.2 * f * alpha));
+                }
+            }
             2 => draw_tile_icon(r, self.icon_atlas, &view),
             _ => {
                 draw_tile_text(r, text, tile, &view, self.strings);
@@ -455,4 +493,32 @@ impl Home {
             }
         }
     }
+}
+
+/// The sheen texture: a soft white disc in the art atlas's unused strip (x 1920–2048).
+const SHEEN: (i32, i32, i32) = (1920, 0, 128);
+
+pub(super) fn upload_sheen(renderer: &Renderer, atlas: Texture) {
+    let (_, _, size) = SHEEN;
+    let half = size as f32 * 0.5;
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let d = ((x as f32 + 0.5 - half).hypot(y as f32 + 0.5 - half) / half).min(1.0);
+            pixels.extend_from_slice(&[255, 255, 255, ((1.0 - d) * (1.0 - d) * 255.0) as u8]);
+        }
+    }
+    renderer.upload(atlas, SHEEN.0, SHEEN.1, size, size, gl::RGBA, &pixels);
+}
+
+/// UVs that put the sheen's centre at (fx, fy) of `rect` (fractions), with a radius of about
+/// 0.8 of its width; the window stays inside the strip for fx in 0.2..0.8.
+fn sheen_uv(rect: Rect, fx: f32, fy: f32) -> [f32; 4] {
+    let (x0, y0, size) = (SHEEN.0 as f32, SHEEN.1 as f32, SHEEN.2 as f32);
+    let scale = size * 0.5 / (rect.w * 0.8);
+    let (w, h) = (rect.w * scale, rect.h * scale);
+    let u0 = (x0 + size * 0.5 - fx.clamp(0.2, 0.8) * w).clamp(x0, x0 + size - w);
+    let v0 = (y0 + size * 0.5 - fy.clamp(0.0, 1.0) * h).clamp(y0, y0 + size - h);
+    let atlas = ART_ATLAS as f32;
+    [u0 / atlas, v0 / atlas, (u0 + w) / atlas, (v0 + h) / atlas]
 }

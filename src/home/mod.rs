@@ -68,6 +68,8 @@ pub enum Action {
     Install(Release),
     /// Load the pictures for TiviOne's store page.
     Pictures(Release),
+    /// Switch the look (fonts load first; the event loop then calls `set_look`).
+    SetTheme(Look),
     /// Start (Some) or stop (None) the live preview.
     Preview(Option<Stream>),
     Exit,
@@ -327,6 +329,8 @@ enum SettingId {
     RefreshImages,
     /// TiviOne's store page (install, update or about).
     TiviOneStore,
+    /// The look: Cinematic or Glass.
+    Theme,
     /// The TiviOne tile on Home while TiviOne is missing.
     TiviOnePromo,
     Info,
@@ -374,6 +378,11 @@ pub struct Home {
     backdrop: Option<String>,
     previous_backdrop: Option<String>,
     backdrop_t: Spring,
+    /// Glass parallax: the focused tile's tilt (-1..1), from the pointer or a short kick when
+    /// focus moves; and the wiggle clock while moving apps.
+    tilt_x: Spring,
+    tilt_y: Spring,
+    wiggle: f32,
     strings: &'static Strings,
     rails: [Rail; 9],
     active: usize,
@@ -447,6 +456,9 @@ impl Home {
             backdrop: None,
             previous_backdrop: None,
             backdrop_t: Spring::new(1.0, 8.0),
+            tilt_x: Spring::new(0.0, 7.0),
+            tilt_y: Spring::new(0.0, 7.0),
+            wiggle: 0.0,
             strings: strings::current(),
             rails: [
                 Rail::new(300.0, 170.0),
@@ -510,7 +522,32 @@ impl Home {
             loaded: false,
         };
         home.apply_look();
+        glass::upload_sheen(renderer, home.art_atlas);
         home
+    }
+
+    /// Switches the look once its fonts are loaded (Settings stays open).
+    pub fn set_look(&mut self, look: Look) {
+        self.look = look;
+        self.apply_look();
+        self.glass_reslot();
+        self.hero = None;
+        self.previous_hero = None;
+        self.backdrop = None;
+        self.previous_backdrop = None;
+        self.settle();
+        self.refocus(true);
+    }
+
+    /// The panel behind menus and dialogs, in the look's style.
+    fn panel(&self, r: &mut Renderer, rect: Rect, open: f32) {
+        match self.look {
+            Look::Cinematic => draw_panel(r, rect, open),
+            Look::Glass => {
+                r.shadow(rect.offset(0.0, 30.0), 28.0, 80.0, Rgba::hex(0).alpha(0.6 * open));
+                r.rect(rect, 28.0, Rgba::hex(0x1E1E24).alpha(0.97 * open));
+            }
+        }
     }
 
     /// Tile sizes and gaps per look (Cinematic keeps its original values).
@@ -552,18 +589,22 @@ impl Home {
     // ---- Magic Remote pointer ---------------------------------------------------------
 
     fn hit(&self, x: f32, y: f32) -> Option<Target> {
+        self.hit_rect(x, y).map(|(_, t)| t)
+    }
+
+    fn hit_rect(&self, x: f32, y: f32) -> Option<(Rect, Target)> {
         // Last drawn wins: overlays are drawn after the rails.
-        self.hits
-            .borrow()
-            .iter()
-            .rev()
-            .find(|(r, _)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
-            .map(|(_, t)| *t)
+        self.hits.borrow().iter().rev().find(|(r, _)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).copied()
     }
 
     /// Moves focus to whatever the pointer is over. Returns true when something changed.
     pub fn pointer(&mut self, x: f32, y: f32) -> bool {
-        let Some(target) = self.hit(x, y) else { return false };
+        let Some((rect, target)) = self.hit_rect(x, y) else { return false };
+        if self.look == Look::Glass {
+            // The tile under the pointer tilts towards it.
+            self.tilt_x.target = ((x - rect.x - rect.w * 0.5) / (rect.w * 0.5)).clamp(-1.0, 1.0);
+            self.tilt_y.target = ((y - rect.y - rect.h * 0.5) / (rect.h * 0.5)).clamp(-1.0, 1.0);
+        }
         let changed = match (target, &mut self.mode) {
             (Target::Gear, Mode::Browse) => !std::mem::replace(&mut self.header, true),
             (Target::SettingsSection(i), Mode::Settings) => {
@@ -1396,6 +1437,7 @@ impl Home {
             })
             .collect();
         let appearance = vec![
+            item(SettingId::Theme, s.theme, self.look.name().to_string(), None),
             item(SettingId::Ambient, s.ambient_light, s.levels[ui.ambient.min(3) as usize].to_string(), None),
             item(SettingId::Motion, s.motion, if ui.reduced_motion { s.reduced } else { s.full }.to_string(), None),
             item(SettingId::Preview, s.live_preview, onoff(ui.preview), Some(ui.preview)),
@@ -1495,6 +1537,12 @@ impl Home {
                 return action;
             }
             SettingId::TiviOnePromo => ui.tivione_promo = !ui.tivione_promo,
+            SettingId::Theme => {
+                let at = Look::ALL.iter().position(|&l| l == self.look).unwrap_or(0);
+                let next = Look::ALL[(at + 1) % Look::ALL.len()];
+                ui.theme = next.id().to_string();
+                self.pending.push(Action::SetTheme(next));
+            }
             SettingId::WeatherShow => ui.weather = !ui.weather,
             SettingId::Units => ui.fahrenheit = !ui.fahrenheit,
             SettingId::Clock24 => ui.clock24 = !ui.clock24,

@@ -232,6 +232,9 @@ fn write_cache(path: PathBuf, key: u64, packed: Packed) {
             }
         }
         out.extend_from_slice(&packed.pixels);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
         let temp = path.with_extension("tmp");
         if std::fs::write(&temp, &out).and_then(|()| std::fs::rename(&temp, &path)).is_err() {
             let _ = std::fs::remove_file(&temp);
@@ -250,15 +253,26 @@ pub struct Text {
 
 impl Text {
     pub fn new(renderer: &Renderer, prewarmed: Prewarmed) -> Self {
-        let Prewarmed { fonts, glyphs, cache } = prewarmed;
         let mut text = Self {
-            fonts,
+            fonts: Vec::new(),
             atlas: renderer.create_texture(ATLAS_W, ATLAS_H, gl::ALPHA),
             cache: HashMap::new(),
             cursor: (PAD, PAD),
             row_h: 0,
             rasterised: 0,
         };
+        text.rebuild(renderer, prewarmed);
+        text
+    }
+
+    /// Takes another font family and its glyphs (a look change), reusing the atlas texture.
+    pub fn rebuild(&mut self, renderer: &Renderer, prewarmed: Prewarmed) {
+        let Prewarmed { fonts, glyphs, cache } = prewarmed;
+        self.fonts = fonts;
+        self.cache.clear();
+        self.cursor = (PAD, PAD);
+        self.row_h = 0;
+        let text = self;
         let packed = match glyphs {
             Glyphs::Cached(packed) => packed,
             Glyphs::Fresh(rasters) => {
@@ -300,7 +314,6 @@ impl Text {
         text.row_h = packed.row_h;
         let rows = (packed.pixels.len() / ATLAS_W as usize) as i32;
         renderer.upload(text.atlas, 0, 0, ATLAS_W, rows, gl::ALPHA, &packed.pixels);
-        text
     }
 
     fn place(&mut self, p: &Placed) {

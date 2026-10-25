@@ -27,9 +27,20 @@ impl Look {
         Look::ALL.into_iter().find(|look| look.id() == id).unwrap_or(Look::Cinematic)
     }
 
+    /// Shown in Settings (a name, not translated).
+    pub fn name(self) -> &'static str {
+        match self {
+            Look::Cinematic => "Cinematic",
+            Look::Glass => "Glass",
+        }
+    }
+
     /// Regular, Medium and SemiBold, in `assets/fonts`.
     pub fn fonts(self) -> [&'static str; 3] {
-        ["Outfit-Regular.ttf", "Outfit-Medium.ttf", "Outfit-SemiBold.ttf"]
+        match self {
+            Look::Cinematic => ["Outfit-Regular.ttf", "Outfit-Medium.ttf", "Outfit-SemiBold.ttf"],
+            Look::Glass => ["Inter-Regular.ttf", "Inter-Medium.ttf", "Inter-SemiBold.ttf"],
+        }
     }
 
     /// Each look keeps its own packed glyph atlas, so switching back is fast.
