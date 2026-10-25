@@ -106,7 +106,7 @@ pub struct Home {
 impl Home {
     pub fn new(renderer: &Renderer) -> Self {
         Self {
-            rails: [Rail::new("Favoriten", 300.0, 170.0), Rail::new("Eingänge", 300.0, 120.0)],
+            rails: [Rail::new("Favorites", 300.0, 170.0), Rail::new("Inputs", 300.0, 120.0)],
             active: 0,
             vscroll: Spring::new(0.0, 14.0),
             ambient: ACCENT_DEFAULT,
@@ -284,9 +284,9 @@ impl Home {
             eyebrow: self.rails[self.active].title.to_uppercase(),
             title: tile.title.clone(),
             sub: match tile.kind {
-                Kind::App => "OK drücken zum Öffnen".to_string(),
-                Kind::Input { connected: true } => "Verbunden · OK zum Umschalten".to_string(),
-                Kind::Input { connected: false } => "Kein Signal".to_string(),
+                Kind::App => "Press OK to open".to_string(),
+                Kind::Input { connected: true } => "Connected · Press OK to switch".to_string(),
+                Kind::Input { connected: false } => "No signal".to_string(),
             },
         });
         let changed = match (&self.hero, &next) {
@@ -505,7 +505,7 @@ fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, rect: Rect, f:
         Kind::Input { connected } => {
             let x = rect.x + 52.0;
             text.draw(r, &tile.title, x, rect.y + rect.h * 0.5 - 2.0, INPUT_LABEL, TEXT.alpha(alpha));
-            let sub = if connected { "Verbunden" } else { "Kein Signal" };
+            let sub = if connected { "Connected" } else { "No signal" };
             text.draw(r, sub, x, rect.y + rect.h * 0.5 + 26.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
         }
     }

@@ -61,7 +61,7 @@ mod backend {
                         ("piccap", "PicCap", "#8E8E99"),
                         ("screenview", "Screen Viewer", "#3FB37F"),
                         ("hbchannel", "Homebrew Channel", "#C0392B"),
-                        ("settings", "Einstellungen", "#9AA3AE"),
+                        ("settings", "Settings", "#9AA3AE"),
                     ];
                     sink.send(Update::Apps(
                         apps.iter()
@@ -88,7 +88,7 @@ mod backend {
                 }
                 Request::Launch { app_id, .. } => {
                     log!("preview: would launch {app_id}");
-                    sink.send(Update::Notice(format!("Vorschau: {app_id} würde starten")));
+                    sink.send(Update::Notice(format!("Preview: would launch {app_id}")));
                 }
             }
         }
@@ -115,7 +115,7 @@ mod backend {
             Ok(luna) => luna,
             Err(error) => {
                 log!("luna: {error}");
-                sink.send(Update::Notice("Keine Verbindung zum TV-Dienst".into()));
+                sink.send(Update::Notice("Cannot reach the TV service".into()));
                 return;
             }
         };
@@ -160,7 +160,7 @@ mod backend {
             Ok(reply) => model::apps_from_launch_points(&reply, APP_ID),
             Err(error) => {
                 log!("launch points: {error}");
-                sink.send(Update::Notice("App-Liste nicht verfügbar".into()));
+                sink.send(Update::Notice("App list unavailable".into()));
                 Vec::new()
             }
         };
@@ -225,7 +225,7 @@ mod backend {
         let quoted = payload.to_string().replace('\'', "");
         if let Err(error) = exec(luna, &format!("luna-send -n 1 {uri} '{quoted}'")) {
             log!("launch {app_id} via hbchannel: {error}");
-            sink.send(Update::Notice("App konnte nicht gestartet werden".into()));
+            sink.send(Update::Notice("Could not launch the app".into()));
         }
     }
 }

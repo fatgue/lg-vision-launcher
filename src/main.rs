@@ -214,7 +214,7 @@ fn run(started: Instant) -> Result<(), String> {
         renderer.begin((w, h), theme::BG);
         let began = Instant::now();
         let clock = format!("{:02}:{:02}", now.hour(), now.minute());
-        home.draw(&mut renderer, &mut text, &clock, &german_date(&now));
+        home.draw(&mut renderer, &mut text, &clock, &format_date(&now));
         renderer.end();
         let submitted = Instant::now();
         let last = options.frames.is_some_and(|n| frames + 1 >= n);
@@ -344,13 +344,13 @@ fn ms_to_next_minute() -> c_int {
     ms.clamp(50, 60_000) as c_int
 }
 
-fn german_date(now: &chrono::DateTime<chrono::Local>) -> String {
-    const DAYS: [&str; 7] = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
+fn format_date(now: &chrono::DateTime<chrono::Local>) -> String {
+    const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     const MONTHS: [&str; 12] = [
-        "Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember",
+        "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December",
     ];
     format!(
-        "{}, {}. {}",
+        "{}, {} {}",
         DAYS[now.weekday().num_days_from_monday() as usize],
         now.day(),
         MONTHS[now.month0() as usize]
