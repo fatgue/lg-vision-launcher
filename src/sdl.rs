@@ -56,6 +56,9 @@ pub const KEY_LEFT: i32 = 0x4000_0050;
 pub const KEY_DOWN: i32 = 0x4000_0051;
 pub const KEY_UP: i32 = 0x4000_0052;
 pub const KEY_KP_ENTER: i32 = 0x4000_0058;
+pub const KEY_KP_1: i32 = 0x4000_0059;
+pub const KEY_KP_9: i32 = 0x4000_0061;
+pub const KEY_KP_0: i32 = 0x4000_0062;
 pub const KEY_AC_BACK: i32 = 0x4000_010E;
 /// SDL-webOS reports the remote's Back key outside SDL's standard scancode range.
 pub const KEY_WEBOS_BACK: i32 = (1 << 30) | 482;

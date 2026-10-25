@@ -2,7 +2,7 @@
 use crate::anim::Spring;
 use crate::color::Rgba;
 use crate::gl;
-use crate::model::{App, Entity, Icon, Input, MediaItem, Notice, ServiceRequest, Status, Weather};
+use crate::model::{App, Entity, Icon, Input, MediaItem, Notice, ServiceRequest, Status, TvFeed, Weather, TIVIONE_APP};
 use crate::render::{Rect, Renderer, Texture, LOGICAL_H, LOGICAL_W};
 use crate::storage::Prefs;
 use crate::strings::{self, Strings};
@@ -22,10 +22,14 @@ const AMBIENT_SPEED: f32 = 6.0;
 
 const FAVORITES: usize = 0;
 const CONTINUE: usize = 1;
-const HOME: usize = 2;
-const INPUTS: usize = 3;
-const HIDDEN: usize = 4;
-const SETTINGS: usize = 5;
+const TV_RECENT: usize = 2;
+const TV_FAVORITES: usize = 3;
+const TV_COMING: usize = 4;
+const HOME: usize = 5;
+const INPUTS: usize = 6;
+const HIDDEN: usize = 7;
+const SETTINGS: usize = 8;
+const DIGIT_WAIT: Duration = Duration::from_millis(1600);
 const PLEX_APP: &str = "cdp-30";
 
 pub enum Action {
@@ -45,12 +49,14 @@ pub enum Key {
     /// OK held past the long-press threshold (detected by the event loop).
     LongOk,
     Back,
+    Digit(u8),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Service {
     HomeAssistant,
     Plex,
+    TiviOne,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -60,6 +66,8 @@ enum Kind {
     Media { progress: f32 },
     Entity { on: Option<bool> },
     Setting { service: Service, connected: bool },
+    Channel { id: i64 },
+    Reminder { id: i64, start: i64 },
 }
 
 struct Tile {
@@ -176,6 +184,8 @@ enum Mode {
     Menu(Menu),
     Move { original: Vec<String> },
     Setup { service: Service, closing_at: Option<Instant> },
+    /// One-time TiviOne offer; `yes` = focus on "Turn on".
+    Offer { yes: bool },
 }
 
 struct Hero {
@@ -187,13 +197,17 @@ struct Hero {
 
 pub struct Home {
     strings: &'static Strings,
-    rails: [Rail; 6],
+    rails: [Rail; 9],
     active: usize,
     mode: Mode,
     prefs: Prefs,
     apps: Vec<App>,
     status: Status,
     weather: Option<Weather>,
+    tv: Option<TvFeed>,
+    offered: bool,
+    digits: Option<(String, Instant)>,
+    pending: Option<Action>,
     vscroll: Spring,
     overlay: Spring,
     lift: Spring,
@@ -223,6 +237,9 @@ impl Home {
             rails: [
                 Rail::new(300.0, 170.0),
                 Rail::new(300.0, 170.0),
+                Rail::new(300.0, 170.0),
+                Rail::new(300.0, 170.0),
+                Rail::new(300.0, 150.0),
                 Rail::new(300.0, 150.0),
                 Rail::new(300.0, 120.0),
                 Rail::new(300.0, 170.0),
@@ -234,6 +251,10 @@ impl Home {
             apps: Vec::new(),
             status: Status::default(),
             weather: None,
+            tv: None,
+            offered: false,
+            digits: None,
+            pending: None,
             vscroll: Spring::new(0.0, 14.0),
             overlay: Spring::new(0.0, 22.0),
             lift: Spring::new(0.0, 18.0),
@@ -261,6 +282,9 @@ impl Home {
         match rail {
             FAVORITES => s.favorites,
             CONTINUE => s.continue_watching,
+            TV_RECENT => s.tv_recent,
+            TV_FAVORITES => s.tv_favorites,
+            TV_COMING => s.tv_coming,
             HOME => s.home,
             INPUTS => s.inputs,
             HIDDEN => s.hidden,
@@ -273,6 +297,8 @@ impl Home {
     pub fn set_apps(&mut self, apps: Vec<App>) {
         self.apps = apps;
         self.rebuild_app_rails();
+        // The Settings row and the TiviOne offer depend on what is installed.
+        self.set_status(self.status.clone());
     }
 
     /// Splits the LG launch points into favourites (user order, then LG order) and hidden apps.
@@ -312,7 +338,11 @@ impl Home {
         if matches!(self.mode, Mode::Menu(_) | Mode::Move { .. }) {
             self.mode = Mode::Browse;
         }
-        self.restore_focus(focused_id);
+        // Vision always opens on the first favourite, whatever data arrived first.
+        if !self.loaded {
+            self.active = FAVORITES;
+        }
+        self.restore_focus(if self.loaded { focused_id } else { None });
         self.loaded = true;
         self.refocus(true);
     }
@@ -410,15 +440,24 @@ impl Home {
             tile.accent = Rgba::hex(0x9AA3B2);
             tile
         };
-        let tiles = vec![
+        let mut tiles = vec![
             setting(Service::HomeAssistant, s.home_assistant, &status.ha, &status.ha_error, 0),
             setting(Service::Plex, s.plex, &status.plex, &status.plex_error, 1),
         ];
+        if self.apps.iter().any(|a| a.id == TIVIONE_APP) {
+            let on = status.tivione == Some(true);
+            let mut tile = Tile::new("setting:TiviOne".into(), s.tivione.into(), Kind::Setting { service: Service::TiviOne, connected: on }, 2);
+            tile.detail = if on { s.shown_on_home } else { s.off }.to_string();
+            tile.bg = Rgba::hex(0x14161C);
+            tile.accent = Rgba::hex(0x2BB8A6);
+            tiles.push(tile);
+        }
         // Close a setup panel shortly after its service connects.
         if let Mode::Setup { service, closing_at } = &mut self.mode {
             let now_connected = match service {
                 Service::HomeAssistant => status.ha.is_some() && self.status.ha.is_none(),
                 Service::Plex => status.plex.is_some() && self.status.plex.is_none(),
+                Service::TiviOne => false,
             };
             if now_connected {
                 *closing_at = Some(Instant::now() + Duration::from_millis(1600));
@@ -430,7 +469,77 @@ impl Home {
             .and_then(|url| qrcodegen::QrCode::encode_text(url, qrcodegen::QrCodeEcc::Medium).ok().map(|qr| (url.clone(), qr)));
         self.status = status;
         self.rails[SETTINGS].replace(tiles);
+        self.maybe_offer();
         self.refocus(false);
+    }
+
+    /// Offers the TiviOne integration once, when TiviOne is installed and nothing was decided.
+    fn maybe_offer(&mut self) {
+        let installed = self.apps.iter().any(|a| a.id == TIVIONE_APP);
+        if !self.offered && installed && self.status.tivione.is_none() && matches!(self.mode, Mode::Browse) && self.loaded {
+            self.offered = true;
+            self.mode = Mode::Offer { yes: true };
+        }
+    }
+
+    pub fn set_tv(&mut self, feed: Option<TvFeed>) {
+        self.tv = feed;
+        let Some(tv) = &self.tv else {
+            for rail in [TV_RECENT, TV_FAVORITES, TV_COMING] {
+                self.rails[rail].replace(Vec::new());
+            }
+            self.fix_active();
+            self.refocus(false);
+            return;
+        };
+        let channel_tiles = |ids: &[i64]| -> Vec<Tile> {
+            ids.iter()
+                .filter_map(|id| tv.channels.get(id).map(|c| (*id, c)))
+                .enumerate()
+                .map(|(i, (id, channel))| {
+                    let mut tile = Tile::new(format!("tv:{id}"), channel.name.clone(), Kind::Channel { id }, i);
+                    tile.detail = channel.number.map(|n| n.to_string()).unwrap_or_default();
+                    tile.launch_id = TIVIONE_APP.into();
+                    tile.params = Some(serde_json::json!({ "channelId": id, "playlistId": tv.playlist_id }));
+                    tile.bg = Rgba::hex(0x0E1A2E);
+                    tile.accent = Rgba::hex(0x3E7BFA);
+                    tile
+                })
+                .collect()
+        };
+        let recent = channel_tiles(&tv.recent);
+        let favorites = channel_tiles(&tv.favorites);
+        let coming: Vec<Tile> = tv
+            .reminders
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let mut tile = Tile::new(format!("reminder:{}:{}", r.channel, r.start), r.title.clone(), Kind::Reminder { id: r.channel, start: r.start }, i);
+                tile.detail = tv.channels.get(&r.channel).map(|c| c.name.clone()).unwrap_or_default();
+                tile.launch_id = TIVIONE_APP.into();
+                tile.params = Some(serde_json::json!({ "channelId": r.channel, "playlistId": tv.playlist_id }));
+                tile.bg = Rgba::hex(0x15171D);
+                tile.accent = Rgba::hex(0xF2C14E);
+                tile
+            })
+            .collect();
+        self.rails[TV_RECENT].replace(recent);
+        self.rails[TV_FAVORITES].replace(favorites);
+        self.rails[TV_COMING].replace(coming);
+        self.fix_active();
+        self.refocus(false);
+    }
+
+    /// Called every minute: the guide moves on, so the hero text may change.
+    pub fn tick(&mut self) {
+        if self.tv.is_some() {
+            self.refocus(false);
+        }
+    }
+
+    /// An action produced by a timer (digit entry), picked up by the event loop.
+    pub fn take_action(&mut self) -> Option<Action> {
+        self.pending.take()
     }
 
     pub fn set_weather(&mut self, weather: Option<Weather>) {
@@ -544,6 +653,8 @@ impl Home {
             Mode::Menu(_) => self.menu_key(key),
             Mode::Move { .. } => self.move_key(key),
             Mode::Setup { .. } => self.setup_key(key),
+            Mode::Offer { .. } => self.offer_key(key),
+            Mode::Browse if matches!(key, Key::Digit(_)) || (self.digits.is_some() && key == Key::Ok) => self.digit_key(key),
             Mode::Browse => self.browse_key(key, home_mode),
         };
         self.refocus(false);
@@ -581,11 +692,63 @@ impl Home {
         None
     }
 
+    fn offer_key(&mut self, key: Key) -> Option<Action> {
+        let Mode::Offer { yes } = &mut self.mode else { return None };
+        match key {
+            Key::Left | Key::Right => *yes = !*yes,
+            Key::Ok => {
+                let choice = *yes;
+                self.mode = Mode::Browse;
+                return Some(Action::Service(ServiceRequest::TiviOne(choice)));
+            }
+            Key::Back => {
+                self.mode = Mode::Browse;
+                return Some(Action::Service(ServiceRequest::TiviOne(false)));
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Direct channel entry with the digit keys (TiviOne on): tunes after a short pause or OK.
+    fn digit_key(&mut self, key: Key) -> Option<Action> {
+        if self.tv.is_none() {
+            return None;
+        }
+        match key {
+            Key::Digit(d) => {
+                let entry = self.digits.get_or_insert((String::new(), Instant::now()));
+                if entry.0.len() < 4 {
+                    entry.0.push((b'0' + d) as char);
+                }
+                entry.1 = Instant::now();
+                None
+            }
+            _ => self.tune_digits(),
+        }
+    }
+
+    fn tune_digits(&mut self) -> Option<Action> {
+        let (entry, _) = self.digits.take()?;
+        let tv = self.tv.as_ref()?;
+        let number: u32 = entry.parse().ok()?;
+        match tv.numbers.get(&number) {
+            Some(id) => Some(Action::Launch {
+                app_id: TIVIONE_APP.into(),
+                params: Some(serde_json::json!({ "channelId": id, "playlistId": tv.playlist_id })),
+            }),
+            None => {
+                self.notice = Some((format!("{} {number}", self.strings.no_channel), Instant::now()));
+                None
+            }
+        }
+    }
+
     fn activate(&mut self) -> Option<Action> {
         let rail = &mut self.rails[self.active];
         let tile = rail.tiles.get_mut(rail.focus)?;
         match tile.kind {
-            Kind::App | Kind::Input { .. } | Kind::Media { .. } => {
+            Kind::App | Kind::Input { .. } | Kind::Media { .. } | Kind::Channel { .. } | Kind::Reminder { .. } => {
                 Some(Action::Launch { app_id: tile.launch_id.clone(), params: tile.params.clone() })
             }
             Kind::Entity { on } => {
@@ -597,6 +760,7 @@ impl Home {
                 }
                 Some(Action::Service(ServiceRequest::HaAction(tile.id.clone())))
             }
+            Kind::Setting { service: Service::TiviOne, connected } => Some(Action::Service(ServiceRequest::TiviOne(!connected))),
             Kind::Setting { service, connected } => {
                 self.mode = Mode::Setup { service, closing_at: None };
                 match (service, connected) {
@@ -613,6 +777,7 @@ impl Home {
         let connected = match service {
             Service::HomeAssistant => self.status.ha.is_some(),
             Service::Plex => self.status.plex.is_some(),
+            Service::TiviOne => false,
         };
         match key {
             Key::Back => {
@@ -627,7 +792,7 @@ impl Home {
                 self.mode = Mode::Browse;
                 Some(Action::Service(match service {
                     Service::HomeAssistant => ServiceRequest::HaDisconnect,
-                    Service::Plex => ServiceRequest::PlexDisconnect,
+                    _ => ServiceRequest::PlexDisconnect,
                 }))
             }
             _ => None,
@@ -735,7 +900,7 @@ impl Home {
 
     fn refocus(&mut self, instant: bool) {
         let moving = matches!(self.mode, Mode::Move { .. });
-        let overlay = matches!(self.mode, Mode::Menu(_) | Mode::Setup { .. });
+        let overlay = matches!(self.mode, Mode::Menu(_) | Mode::Setup { .. } | Mode::Offer { .. });
         let active = self.active;
         for (r, rail) in self.rails.iter_mut().enumerate() {
             for (i, tile) in rail.tiles.iter_mut().enumerate() {
@@ -778,6 +943,9 @@ impl Home {
 
     fn hero_for(&self, tile: &Tile, moving: bool) -> Hero {
         let s = self.strings;
+        if let (Kind::Channel { id } | Kind::Reminder { id, .. }, Some(tv)) = (tile.kind, &self.tv) {
+            return self.channel_hero(tile, id, tv);
+        }
         let eyebrow = if moving { s.moving.to_uppercase() } else { self.rail_title(self.active).to_uppercase() };
         let (sub, hint) = match (tile.kind, self.active) {
             _ if moving => (s.moving_hint.to_string(), None),
@@ -788,11 +956,41 @@ impl Home {
             (Kind::Media { .. }, _) => (tile.detail.clone(), Some(s.opens_in_plex)),
             (Kind::Entity { on: None }, _) => (tile.detail.clone(), Some(s.press_ok_to_activate)),
             (Kind::Entity { .. }, _) => (tile.detail.clone(), Some(s.press_ok_to_toggle)),
+            (Kind::Setting { service: Service::TiviOne, .. }, _) => (tile.detail.clone(), Some(s.press_ok_to_toggle)),
             (Kind::Setting { connected, .. }, _) => {
                 (tile.detail.clone(), Some(if connected { s.press_ok_to_manage } else { s.press_ok_to_connect }))
             }
+            (Kind::Channel { .. } | Kind::Reminder { .. }, _) => (tile.detail.clone(), Some(s.press_ok_to_watch)),
         };
         Hero { eyebrow, title: tile.title.clone(), sub, hint }
+    }
+
+    /// "LIVE · 1 · Das Erste" / programme title / times and what follows.
+    fn channel_hero(&self, tile: &Tile, id: i64, tv: &TvFeed) -> Hero {
+        let s = self.strings;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let channel = tv.channels.get(&id);
+        let name = channel.map(|c| c.name.as_str()).unwrap_or(&tile.title);
+        let number = channel.and_then(|c| c.number).map(|n| format!("{n} · ")).unwrap_or_default();
+        let (now, next) = tv.now_next(id, now_ms);
+        let time = |ms: i64| clock_text(ms);
+        if let Kind::Reminder { start, .. } = tile.kind {
+            return Hero {
+                eyebrow: format!("{} · {number}{name}", s.tv_coming).to_uppercase(),
+                title: tile.title.clone(),
+                sub: time(start),
+                hint: Some(s.press_ok_to_watch),
+            };
+        }
+        let title = now.map(|p| p.title.clone()).unwrap_or_else(|| name.to_string());
+        let mut sub = now.map(|p| format!("{} – {}", time(p.start), time(p.end))).unwrap_or_default();
+        if let Some(next) = next {
+            if !sub.is_empty() {
+                sub.push_str(" · ");
+            }
+            sub.push_str(&format!("{} {} {}", s.next, time(next.start), next.title));
+        }
+        Hero { eyebrow: format!("{} · {number}{name}", s.live).to_uppercase(), title, sub, hint: Some(s.press_ok_to_watch) }
     }
 
     /// Advances animations; returns true while anything still moves.
@@ -822,6 +1020,12 @@ impl Home {
             } else {
                 moving = true;
             }
+        }
+        if let Some((_, last)) = &self.digits {
+            if last.elapsed() >= DIGIT_WAIT {
+                self.pending = self.tune_digits();
+            }
+            moving = true;
         }
         if let Mode::Setup { closing_at: Some(at), .. } = self.mode {
             if Instant::now() >= at {
@@ -857,6 +1061,8 @@ impl Home {
         self.draw_rails(r, text);
         self.draw_menu(r, text);
         self.draw_setup(r, text);
+        self.draw_offer(r, text);
+        self.draw_digits(r, text);
         self.draw_notice(r, text);
     }
 
@@ -927,6 +1133,7 @@ impl Home {
                     let scale = 1.0 + (FOCUS_SCALE - 1.0) * f + 0.05 * lifted;
                     let rect = base.scale_about(scale, 0.5, 1.0).offset(0.0, -14.0 * lifted);
                     let view = TileView {
+                        now: self.channel_now(tile),
                         rect,
                         f,
                         alpha,
@@ -944,6 +1151,15 @@ impl Home {
                 }
             }
         }
+    }
+
+    fn channel_now(&self, tile: &Tile) -> Option<(String, f32)> {
+        let Kind::Channel { id } = tile.kind else { return None };
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let (now, _) = self.tv.as_ref()?.now_next(id, now_ms);
+        let now = now?;
+        let progress = (now_ms - now.start) as f32 / (now.end - now.start).max(1) as f32;
+        Some((now.title.clone(), progress.clamp(0.0, 1.0)))
     }
 
     fn draw_menu(&self, r: &mut Renderer, text: &mut Text) {
@@ -1022,7 +1238,7 @@ impl Home {
                     }
                 }
             }
-            Service::Plex => {
+            Service::Plex | Service::TiviOne => {
                 if let Some(account) = &self.status.plex {
                     text.draw_top(r, s.plex, x, y, SETUP_TITLE, a(1.0));
                     y += 90.0;
@@ -1052,6 +1268,51 @@ impl Home {
         text.draw_top(r, s.back_to_close, panel.x + panel.w - 64.0 - hint_w, panel.y + panel.h - 64.0, SETUP_SMALL, a(0.45));
     }
 
+    fn draw_offer(&self, r: &mut Renderer, text: &mut Text) {
+        let open = self.overlay.value.clamp(0.0, 1.0);
+        let Mode::Offer { yes } = self.mode else { return };
+        if open <= 0.01 {
+            return;
+        }
+        let s = self.strings;
+        r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(0.6 * open));
+        let lines = wrap(text, r, s.offer_body, SETUP_BODY, 800.0 - 112.0);
+        let height = 140.0 + lines.len() as f32 * 42.0 + 48.0 + 64.0 + 52.0;
+        let panel = Rect::new(560.0, (LOGICAL_H - height) * 0.5 + 20.0 * (1.0 - open), 800.0, height);
+        draw_panel(r, panel, open);
+        let x = panel.x + 56.0;
+        text.draw_top(r, s.offer_title, x, panel.y + 52.0, SETUP_TITLE, TEXT.alpha(open));
+        let mut y = panel.y + 140.0;
+        for line in &lines {
+            text.draw_top(r, line, x, y, SETUP_BODY, TEXT.alpha(0.8 * open));
+            y += 42.0;
+        }
+        let by = panel.y + panel.h - 52.0 - 64.0;
+        let mut bx = x;
+        for (label, focused) in [(s.turn_on, yes), (s.not_now, !yes)] {
+            let w = text.measure(r, label, MENU_ITEM) + 72.0;
+            let rect = Rect::new(bx, by, w, 64.0);
+            if focused {
+                r.rect(rect, 32.0, TEXT.alpha(open));
+            } else {
+                r.stroke(rect, 32.0, 1.5, TEXT.alpha(0.35 * open));
+            }
+            text.draw(r, label, bx + 36.0, by + 42.0, MENU_ITEM, if focused { BG } else { TEXT }.alpha(open));
+            bx += w + 20.0;
+        }
+    }
+
+    /// The channel number being typed, bottom right ("1 2 _").
+    fn draw_digits(&self, r: &mut Renderer, text: &mut Text) {
+        let Some((entry, _)) = &self.digits else { return };
+        let label: String = entry.chars().map(|c| format!("{c} ")).collect::<String>() + "_";
+        let w = text.measure(r, &label, DIGITS) + 64.0;
+        let rect = Rect::new(LOGICAL_W - SAFE_X - w, LOGICAL_H - 54.0 - 96.0, w, 96.0);
+        r.rect(rect, 48.0, Rgba::hex(0x14161C).alpha(0.94));
+        r.stroke(rect, 48.0, 1.0, TEXT.alpha(0.16));
+        text.draw(r, &label, rect.x + 32.0, rect.y + 66.0, DIGITS, TEXT);
+    }
+
     fn draw_notice(&self, r: &mut Renderer, text: &mut Text) {
         let Some((message, since)) = &self.notice else { return };
         let age = since.elapsed().as_secs_f32();
@@ -1065,6 +1326,8 @@ impl Home {
 }
 
 struct TileView {
+    /// Guide position for channel tiles: (programme title, progress).
+    now: Option<(String, f32)>,
     rect: Rect,
     f: f32,
     alpha: f32,
@@ -1250,6 +1513,30 @@ fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: &TileView, 
             let sub = if connected { s.connected } else { s.no_signal };
             text.draw(r, sub, x, rect.y + rect.h * 0.5 + 26.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
         }
+        Kind::Channel { .. } => {
+            let (x, w) = (rect.x + 24.0, rect.w - 48.0);
+            let mut top = rect.y + 20.0;
+            if !tile.detail.is_empty() {
+                text.draw_top(r, &tile.detail, x, top, INPUT_SUB, TEXT.alpha(0.6 * alpha));
+                top += 28.0;
+            }
+            let name = clip(text, r, tile.title.trim(), ENTITY_NAME, w);
+            text.draw_top(r, &name, x, top, ENTITY_NAME, TEXT.alpha(alpha));
+            if let Some((title, progress)) = &v.now {
+                let line = clip(text, r, title, INPUT_LABEL, w);
+                text.draw(r, &line, x, rect.y + rect.h - 40.0, INPUT_LABEL, TEXT.alpha(alpha));
+                let track = Rect::new(x, rect.y + rect.h - 24.0, w, 4.0);
+                r.rect(track, 2.0, TEXT.alpha(0.18 * alpha));
+                r.rect(Rect::new(track.x, track.y, track.w * progress, 4.0), 2.0, TEXT.alpha(0.9 * alpha));
+            }
+        }
+        Kind::Reminder { start, .. } => {
+            let x = rect.x + 24.0;
+            text.draw_top(r, &clock_text(start), x, rect.y + 18.0, ENTITY_NAME, TEXT.alpha(alpha));
+            let line = clip(text, r, &tile.title, INPUT_LABEL, rect.w - 48.0);
+            text.draw(r, &line, x, rect.y + rect.h - 52.0, INPUT_LABEL, TEXT.alpha(alpha));
+            text.draw(r, &tile.detail, x, rect.y + rect.h - 22.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
+        }
         Kind::Setting { .. } => {
             let x = rect.x + 52.0;
             let style = fit(text, r, &tile.title, INPUT_LABEL, rect.w - 70.0);
@@ -1257,6 +1544,28 @@ fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: &TileView, 
             text.draw(r, &tile.detail, x, rect.y + rect.h * 0.5 + 26.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
         }
     }
+}
+
+/// Local wall-clock "HH:MM" for a UTC timestamp in ms.
+fn clock_text(ms: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_millis_opt(ms).single().map(|t| t.format("%H:%M").to_string()).unwrap_or_default()
+}
+
+/// Shortens `label` with an ellipsis to fit `width`.
+fn clip(text: &mut Text, r: &Renderer, label: &str, style: Style, width: f32) -> String {
+    if text.measure(r, label, style) <= width {
+        return label.to_string();
+    }
+    let mut chars: Vec<char> = label.chars().collect();
+    while chars.len() > 1 {
+        chars.pop();
+        let candidate: String = chars.iter().collect::<String>().trim_end().to_string() + "…";
+        if text.measure(r, &candidate, style) <= width {
+            return candidate;
+        }
+    }
+    label.to_string()
 }
 
 fn fit(text: &mut Text, r: &Renderer, label: &str, style: Style, width: f32) -> Style {

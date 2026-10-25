@@ -184,7 +184,14 @@ impl Text {
         if let Some(glyph) = self.cache.get(&key) {
             return *glyph;
         }
-        let (metrics, bitmap) = self.fonts[key.weight as usize].rasterize(key.ch, key.size as f32);
+        let font = &self.fonts[key.weight as usize];
+        // Characters the font lacks (other scripts) are skipped rather than drawn as boxes.
+        if font.lookup_glyph_index(key.ch) == 0 && !key.ch.is_whitespace() {
+            let empty = Glyph { uv: [0.0; 4], w: 0.0, h: 0.0, xmin: 0.0, ymin: 0.0, advance: 0.0 };
+            self.cache.insert(key, empty);
+            return empty;
+        }
+        let (metrics, bitmap) = font.rasterize(key.ch, key.size as f32);
         let (w, h) = (metrics.width as i32, metrics.height as i32);
         let (x, y) = match self.allocate(w, h) {
             Some(position) => position,

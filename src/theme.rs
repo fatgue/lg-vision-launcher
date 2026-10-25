@@ -38,6 +38,7 @@ pub const ENTITY_NAME: Style = Style::new(Weight::SemiBold, 26.0);
 pub const SETUP_TITLE: Style = Style::new(Weight::SemiBold, 52.0).tracking(-0.01);
 pub const SETUP_BODY: Style = Style::new(Weight::Regular, 30.0);
 pub const SETUP_SMALL: Style = Style::new(Weight::Regular, 22.0);
+pub const DIGITS: Style = Style::new(Weight::SemiBold, 44.0).tracking(0.08);
 pub const SETUP_CODE: Style = Style::new(Weight::SemiBold, 150.0).tracking(0.12);
 
 pub fn hero(size: f32) -> Style {
@@ -70,6 +71,7 @@ pub fn prewarm_jobs(strings: &Strings) -> Vec<(Style, String)> {
         (SETUP_BODY, latin.clone() + &ui),
         (SETUP_SMALL, latin.clone() + &ui),
         (SETUP_CODE, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".to_string()),
+        (DIGITS, "0123456789_ ".to_string()),
     ];
     for size in &HERO_SIZES[..2] {
         jobs.push((hero(*size), latin.clone()));

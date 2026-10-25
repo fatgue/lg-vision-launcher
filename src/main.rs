@@ -245,6 +245,11 @@ fn run(started: Instant) -> Result<(), String> {
                 Update::Entities(entities) => home.set_entities(entities),
                 Update::Media(items) => home.set_media(items),
                 Update::Status(status) => home.set_status(status),
+                Update::Tv(feed) => home.set_tv(feed),
+                Update::TvPair(key) => platform.send(Request::Launch {
+                    app_id: model::TIVIONE_APP.into(),
+                    params: Some(serde_json::json!({ "launcherPair": { "key": key } })),
+                }),
             }
             dirty = true;
         }
@@ -252,6 +257,7 @@ fn run(started: Instant) -> Result<(), String> {
         let now = chrono::Local::now();
         if now.minute() != minute {
             minute = now.minute();
+            home.tick();
             dirty = true;
         }
         // Scripted keys (previews/benchmarks): one every 12 frames once data has arrived.
@@ -269,6 +275,9 @@ fn run(started: Instant) -> Result<(), String> {
         let dt = frame_start.duration_since(last_frame).as_secs_f32().min(0.05);
         last_frame = frame_start;
         animating = home.update(dt);
+        if let Some(action) = home.take_action() {
+            dispatch(action, &io);
+        }
         dirty = false;
 
         let (mut w, mut h): (c_int, c_int) = (0, 0);
@@ -318,8 +327,15 @@ struct Io<'a> {
 
 /// Feeds a key to the home screen and dispatches the resulting action. Returns true to quit.
 fn apply(home: &mut Home, io: &Io, key: Key) -> bool {
-    let platform = io.platform;
     match home.key(key, false) {
+        Some(action) => dispatch(action, io),
+        None => false,
+    }
+}
+
+fn dispatch(action: Action, io: &Io) -> bool {
+    let platform = io.platform;
+    match Some(action) {
         Some(Action::Launch { app_id, params }) => {
             log!("launch {app_id}");
             platform.send(Request::Launch { app_id, params });
@@ -412,6 +428,9 @@ fn map_key(sym: i32) -> Option<Key> {
         sdl::KEY_DOWN => Key::Down,
         sdl::KEY_RETURN | sdl::KEY_KP_ENTER => Key::Ok,
         sdl::KEY_ESCAPE | sdl::KEY_BACKSPACE | sdl::KEY_AC_BACK | sdl::KEY_WEBOS_BACK => Key::Back,
+        48..=57 => Key::Digit((sym - 48) as u8),
+        sdl::KEY_KP_1..=sdl::KEY_KP_9 => Key::Digit((sym - sdl::KEY_KP_1 + 1) as u8),
+        sdl::KEY_KP_0 => Key::Digit(0),
         _ => return None,
     })
 }

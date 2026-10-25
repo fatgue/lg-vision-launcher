@@ -13,6 +13,8 @@ pub struct Config {
     pub plex_server_token: Option<String>,
     /// TiviOne integration: None until the user decided.
     pub tivione: Option<bool>,
+    /// Key shared with TiviOne when paired (base64); seals its home-screen snapshot.
+    pub tivione_key: Option<String>,
     /// Weather location override; otherwise taken from Home Assistant.
     pub location: Option<(f64, f64)>,
 }
@@ -33,6 +35,7 @@ impl Config {
             plex_server: text("plexServer"),
             plex_server_token: text("plexServerToken"),
             tivione: value.get("tivione").and_then(Value::as_bool),
+            tivione_key: text("tivioneKey"),
             location: value
                 .get("location")
                 .and_then(|l| Some((l.get("lat")?.as_f64()?, l.get("lon")?.as_f64()?))),
@@ -57,6 +60,7 @@ impl Config {
             "plexServer": self.plex_server,
             "plexServerToken": self.plex_server_token,
             "tivione": self.tivione,
+            "tivioneKey": self.tivione_key,
         });
         if let Some((lat, lon)) = self.location {
             body["location"] = json!({ "lat": lat, "lon": lon });

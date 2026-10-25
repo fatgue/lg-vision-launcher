@@ -6,8 +6,11 @@ publish = false
 description = "Vision: a fast native home launcher for rooted LG webOS TVs"
 
 [dependencies]
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+crypto_secretbox = "0.1"
 fontdue = "0.9"
+getrandom = "0.2"
 jpeg-decoder = { version = "0.3", default-features = false }
 libloading = "0.8"
 png = "0.17"

@@ -3,7 +3,8 @@
 use crate::companion::{self, Companion};
 use crate::config::Config;
 use crate::log::log;
-use crate::model::{self, Entity, MediaItem, ServiceRequest, Status, Update, Weather};
+use crate::model::{self, Entity, MediaItem, ServiceRequest, Status, TvFeed, Update, Weather};
+use base64::Engine;
 use crate::net;
 use crate::platform::Sink;
 use serde_json::{json, Value};
@@ -17,6 +18,9 @@ const HA_EVERY: Duration = Duration::from_secs(60);
 const PLEX_EVERY: Duration = Duration::from_secs(5 * 60);
 const PIN_POLL: Duration = Duration::from_secs(2);
 const PLEX_TV: &str = "https://plex.tv/api/v2";
+const TV_EVERY: Duration = Duration::from_secs(20);
+/// Where the TiviOne service drops the sealed snapshot (shared /tmp of both jails).
+const TV_FEED: &str = "/tmp/tivione/launcher-feed.json";
 
 pub struct Services {
     requests: Sender<ServiceRequest>,
@@ -59,6 +63,8 @@ struct Worker {
     pin: Option<Pin>,
     companion: Option<Companion>,
     media_art: HashSet<String>,
+    next_tv: Instant,
+    tv_seen: Option<std::time::SystemTime>,
 }
 
 impl Worker {
@@ -86,11 +92,23 @@ impl Worker {
             pin: None,
             companion: None,
             media_art: HashSet::new(),
+            next_tv: now,
+            tv_seen: None,
         }
     }
 
     fn run(mut self, rx: mpsc::Receiver<ServiceRequest>) {
         self.publish_status();
+        // The last snapshot survives reboots (until TiviOne publishes a fresh one).
+        if self.config.tivione == Some(true) {
+            if let Some(feed) = std::fs::read_to_string(self.data_dir.join("tivione-feed.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .and_then(|value| TvFeed::parse(&value))
+            {
+                self.sink.send(Update::Tv(Some(feed)));
+            }
+        }
         loop {
             let wait = self.next_due().saturating_duration_since(Instant::now());
             match rx.recv_timeout(wait) {
@@ -110,6 +128,9 @@ impl Worker {
             }
             if self.config.plex_token.is_some() {
                 due = due.min(self.next_plex);
+            }
+            if self.config.tivione_key.is_some() {
+                due = due.min(self.next_tv);
             }
         }
         if let Some(pin) = &self.pin {
@@ -136,6 +157,7 @@ impl Worker {
                 if visible && !self.visible {
                     self.next_ha = self.next_ha.min(now);
                     self.next_plex = self.next_plex.min(now + Duration::from_millis(300));
+                    self.next_tv = now;
                 }
                 self.visible = visible;
             }
@@ -191,6 +213,22 @@ impl Worker {
             }
             ServiceRequest::TiviOne(enabled) => {
                 self.config.tivione = Some(enabled);
+                self.tv_seen = None;
+                if enabled {
+                    let mut key = [0u8; 32];
+                    if getrandom::getrandom(&mut key).is_err() {
+                        log!("tivione: no randomness");
+                        return;
+                    }
+                    let key = base64::engine::general_purpose::STANDARD.encode(key);
+                    self.config.tivione_key = Some(key.clone());
+                    self.sink.send(Update::TvPair(key));
+                    self.next_tv = now + Duration::from_secs(3);
+                } else {
+                    self.config.tivione_key = None;
+                    let _ = std::fs::remove_file(self.data_dir.join("tivione-feed.json"));
+                    self.sink.send(Update::Tv(None));
+                }
                 self.save();
                 self.status.tivione = Some(enabled);
                 self.publish_status();
@@ -210,9 +248,45 @@ impl Worker {
         if now >= self.next_weather {
             self.next_weather = now + self.weather().map_or(Duration::from_secs(120), |_| WEATHER_EVERY);
         }
+        if self.visible && self.config.tivione_key.is_some() && now >= self.next_tv {
+            self.next_tv = now + TV_EVERY;
+            self.read_tv_feed();
+        }
         if self.visible && self.config.plex_token.is_some() && now >= self.next_plex {
             self.next_plex = now + PLEX_EVERY;
             self.plex_refresh();
+        }
+    }
+
+    // ---- TiviOne ---------------------------------------------------------------------
+
+    /// Opens the sealed TiviOne snapshot when it changed; keeps a private plaintext copy.
+    fn read_tv_feed(&mut self) {
+        let Some(key) = self.config.tivione_key.as_deref() else { return };
+        let Ok(modified) = std::fs::metadata(TV_FEED).and_then(|m| m.modified()) else { return };
+        if self.tv_seen == Some(modified) {
+            return;
+        }
+        self.tv_seen = Some(modified);
+        let opened = std::fs::read_to_string(TV_FEED)
+            .map_err(|e| e.to_string())
+            .and_then(|text| open_sealed(&text, key));
+        match opened {
+            Ok(value) => {
+                let Some(feed) = TvFeed::parse(&value) else { return };
+                let copy = self.data_dir.join("tivione-feed.json");
+                if std::fs::write(&copy, value.to_string()).is_ok() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o600));
+                    }
+                }
+                log!("tivione: {} channels, {} favourites, {} recent", feed.channels.len(), feed.favorites.len(), feed.recent.len());
+                self.sink.send(Update::Tv(Some(feed)));
+            }
+            // A snapshot sealed for another pairing (or a stale one): wait for the next.
+            Err(error) => log!("tivione feed: {error}"),
         }
     }
 
@@ -559,4 +633,23 @@ fn media_item(item: &Value) -> Option<MediaItem> {
         progress: if duration > 0.0 { (offset / duration).clamp(0.0, 1.0) } else { 0.0 },
         remaining_min: ((duration - offset).max(0.0) / 60_000.0).round() as u32,
     })
+}
+
+/// Opens `{ v, nonce, box }` sealed with NaCl secretbox (XSalsa20-Poly1305).
+fn open_sealed(text: &str, key: &str) -> Result<Value, String> {
+    use crypto_secretbox::{aead::Aead, KeyInit, XSalsa20Poly1305};
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let envelope: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let field = |k: &str| envelope.get(k).and_then(Value::as_str).ok_or(format!("missing {k}"));
+    let nonce = b64.decode(field("nonce")?).map_err(|e| e.to_string())?;
+    let sealed = b64.decode(field("box")?).map_err(|e| e.to_string())?;
+    let key = b64.decode(key).map_err(|e| e.to_string())?;
+    if key.len() != 32 || nonce.len() != 24 {
+        return Err("bad key or nonce".into());
+    }
+    let cipher = XSalsa20Poly1305::new(crypto_secretbox::Key::from_slice(&key));
+    let plain = cipher
+        .decrypt(crypto_secretbox::Nonce::from_slice(&nonce), sealed.as_slice())
+        .map_err(|_| "cannot open (not sealed for this pairing)".to_string())?;
+    serde_json::from_slice(&plain).map_err(|e| e.to_string())
 }

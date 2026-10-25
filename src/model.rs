@@ -76,6 +76,104 @@ pub enum Update {
     Entities(Vec<Entity>),
     Media(Vec<MediaItem>),
     Status(Status),
+    /// TiviOne's snapshot (None: integration off or nothing published yet).
+    Tv(Option<TvFeed>),
+    /// Integration switched on: launch TiviOne once with this key to pair.
+    TvPair(String),
+}
+
+/// TiviOne's home-screen snapshot (see tivione/src/core/launcher.ts).
+#[derive(Clone, Debug, Default)]
+pub struct TvFeed {
+    pub playlist_id: i64,
+    pub channels: std::collections::HashMap<i64, TvChannel>,
+    pub favorites: Vec<i64>,
+    pub recent: Vec<i64>,
+    pub reminders: Vec<TvReminder>,
+    pub guide: std::collections::HashMap<i64, Vec<Programme>>,
+    pub numbers: std::collections::HashMap<u32, i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TvChannel {
+    pub name: String,
+    pub number: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TvReminder {
+    pub channel: i64,
+    pub title: String,
+    pub start: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Programme {
+    pub title: String,
+    pub start: i64,
+    pub end: i64,
+}
+
+impl TvFeed {
+    pub fn parse(value: &Value) -> Option<Self> {
+        let ids = |key: &str| -> Vec<i64> { value.get(key).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default() };
+        let channels = value
+            .get("channels")?
+            .as_array()?
+            .iter()
+            .filter_map(|c| {
+                Some((c.get("id")?.as_i64()?, TvChannel {
+                    name: c.get("name")?.as_str()?.to_string(),
+                    number: c.get("number").and_then(Value::as_u64).map(|n| n as u32),
+                }))
+            })
+            .collect();
+        let guide = value
+            .get("guide")
+            .and_then(Value::as_object)
+            .map(|g| {
+                g.iter()
+                    .filter_map(|(id, list)| {
+                        let programmes = list
+                            .as_array()?
+                            .iter()
+                            .filter_map(|p| Some(Programme { title: p.get("t")?.as_str()?.to_string(), start: p.get("s")?.as_i64()?, end: p.get("e")?.as_i64()? }))
+                            .collect();
+                        Some((id.parse().ok()?, programmes))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Self {
+            playlist_id: value.get("playlistId").and_then(Value::as_i64).unwrap_or(0),
+            channels,
+            favorites: ids("favorites"),
+            recent: ids("recent"),
+            reminders: value
+                .get("reminders")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|r| Some(TvReminder { channel: r.get("id")?.as_i64()?, title: r.get("title")?.as_str()?.to_string(), start: r.get("s")?.as_i64()? }))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            guide,
+            numbers: value
+                .get("numbers")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|p| Some((p.get(0)?.as_u64()? as u32, p.get(1)?.as_i64()?))).collect())
+                .unwrap_or_default(),
+        })
+    }
+
+    /// The programme on air at `now_ms` and the one after it.
+    pub fn now_next(&self, channel: i64, now_ms: i64) -> (Option<&Programme>, Option<&Programme>) {
+        let Some(list) = self.guide.get(&channel) else { return (None, None) };
+        let now = list.iter().find(|p| p.start <= now_ms && p.end > now_ms);
+        let after = now.map_or(now_ms, |p| p.end);
+        (now, list.iter().find(|p| p.start >= after))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -131,6 +229,8 @@ pub enum ServiceRequest {
     PlexDisconnect,
     TiviOne(bool),
 }
+
+pub const TIVIONE_APP: &str = "com.tivione.tv";
 
 pub enum Request {
     Refresh,
