@@ -73,7 +73,7 @@ mod backend {
                     // manifest (or --releases) feeds it.
                     sink.send(Update::TiviOne(None));
                     if !std::mem::replace(&mut release_checked, true) {
-                        crate::installer::check(sink.clone());
+                        crate::installer::check(sink.clone(), Default::default());
                     }
                     let apps = [
                         ("plex", "Plex", "#E5A00D"),
@@ -141,8 +141,9 @@ mod backend {
         images_sent: HashSet<String>,
         last_refresh: Option<Instant>,
         images_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        /// When TiviOne's website was last asked for a new release.
+        /// When TiviOne's website was last asked for a new release, and whether it answered.
         release_checked: Option<Instant>,
+        release_answered: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     pub fn run(requests: Receiver<Request>, sink: Sink, data_dir: PathBuf) {
@@ -152,6 +153,7 @@ mod backend {
             last_refresh: None,
             images_busy: Default::default(),
             release_checked: None,
+            release_answered: Default::default(),
         };
         let mut luna = match Luna::connect() {
             Ok(luna) => luna,
@@ -236,10 +238,12 @@ mod backend {
         if let Some(all_apps) = &all_apps {
             sink.send(Update::TiviOne(model::tivione_from_apps(all_apps)));
         }
-        // New TiviOne releases: at most every six hours, on a foreground refresh.
-        if state.release_checked.is_none_or(|t| t.elapsed().as_secs() > 6 * 3600) {
+        // New TiviOne releases on a foreground refresh: every six hours, or after 15 minutes
+        // when the last check got no answer.
+        let interval = if state.release_answered.load(std::sync::atomic::Ordering::Acquire) { 6 * 3600 } else { 15 * 60 };
+        if state.release_checked.is_none_or(|t| t.elapsed().as_secs() > interval) {
             state.release_checked = Some(Instant::now());
-            crate::installer::check(sink.clone());
+            crate::installer::check(sink.clone(), state.release_answered.clone());
         }
 
         match inventory(luna, "luna://com.webos.service.eim/getAllInputStatus") {

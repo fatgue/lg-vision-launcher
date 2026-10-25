@@ -9,7 +9,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 const MANIFEST: &str = "https://tivione.zf-labs.de/download/latest.json";
@@ -28,13 +29,15 @@ pub fn set_manifest(url: String) {
     let _ = MANIFEST_URL.set(url);
 }
 
-/// Looks for the newest release; the answer arrives as `Update::Release`.
-pub fn check(sink: Sink) {
+/// Looks for the newest release; the answer arrives as `Update::Release`. `answered` is set
+/// when the website answered, so the caller can retry a failed check sooner.
+pub fn check(sink: Sink, answered: Arc<AtomicBool>) {
     spawn("release-check", move || {
         let release = fetch_release().map_err(|error| log!("tivione release: {error}")).ok();
         if let Some(release) = &release {
             log!("tivione release: {}", release.version);
         }
+        answered.store(release.is_some(), Ordering::Release);
         sink.send(Update::Release(release));
     });
 }
