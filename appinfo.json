@@ -1,0 +1,17 @@
+{
+  "id": "com.vision.launcher",
+  "version": "0.1.0",
+  "vendor": "Vision",
+  "type": "native",
+  "main": "vision",
+  "title": "Vision",
+  "icon": "icon.png",
+  "largeIcon": "icon-large.png",
+  "appDescription": "A fast native home launcher.",
+  "resolution": "1920x1080",
+  "bgColor": "#07080B",
+  "iconColor": "#07080B",
+  "appCategory": ["home"],
+  "requiredACG": ["application.launcher", "application.query", "lunabus.query"],
+  "handlesRelaunch": false
+}

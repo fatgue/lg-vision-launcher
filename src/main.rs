@@ -1,0 +1,416 @@
+//! Vision: a fast native home launcher for rooted LG webOS TVs.
+//!
+//! The UI thread renders only when something changed (input, data, the clock minute or a
+//! running animation) and otherwise sleeps in SDL_WaitEventTimeout: 0 % GPU when idle.
+mod anim;
+mod color;
+mod dynlib;
+mod gl;
+mod home;
+mod log;
+#[cfg(all(target_os = "linux", target_arch = "arm"))]
+mod luna;
+#[cfg_attr(not(all(target_os = "linux", target_arch = "arm")), allow(dead_code))]
+mod model;
+mod platform;
+mod render;
+mod sdl;
+mod text;
+mod theme;
+
+use crate::home::{Action, Home, Key};
+use crate::log::log;
+use crate::model::{Request, Update};
+use crate::platform::{Platform, APP_ID};
+use crate::render::Renderer;
+use crate::sdl::{Event, Sdl};
+use crate::text::Text;
+use chrono::{Datelike, Timelike};
+use std::ffi::{c_int, CString};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+const WEBOS: bool = cfg!(all(target_os = "linux", target_arch = "arm"));
+
+struct Options {
+    perf: bool,
+    frames: Option<u32>,
+    screenshot: Option<PathBuf>,
+    keys: Vec<Key>,
+}
+
+fn main() {
+    let started = Instant::now();
+    if WEBOS {
+        log::init_file("/tmp/vision.log");
+    }
+    if let Err(error) = run(started) {
+        log!("vision: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run(started: Instant) -> Result<(), String> {
+    let mut args: Vec<String> = std::env::args().collect();
+    // SAM passes no CLI arguments; /tmp/vision-args carries debug flags on the TV. The jailed
+    // process cannot delete root's file in sticky /tmp, so scripts/tv.mjs removes it.
+    if WEBOS {
+        if let Ok(extra) = std::fs::read_to_string("/tmp/vision-args") {
+            let _ = std::fs::remove_file("/tmp/vision-args");
+            args.extend(extra.split_whitespace().map(str::to_string));
+            log!("debug args: {extra}");
+        }
+    }
+    let options = Options {
+        perf: args.iter().any(|a| a == "--perf") || std::env::var_os("VISION_PERF").is_some(),
+        frames: args
+            .iter()
+            .position(|a| a == "--frames")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|n| n.parse().ok()),
+        screenshot: args
+            .iter()
+            .position(|a| a == "--screenshot")
+            .and_then(|i| args.get(i + 1))
+            .map(PathBuf::from),
+        keys: args
+            .iter()
+            .position(|a| a == "--keys")
+            .and_then(|i| args.get(i + 1))
+            .map(|list| list.split(',').filter_map(parse_key).collect())
+            .unwrap_or_default(),
+    };
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    let assets = find_assets(&exe_dir)?;
+
+    if WEBOS {
+        // SDL-webOS reads APPID for its shell surface and WMCLASS from the environment.
+        std::env::set_var("APPID", APP_ID);
+        std::env::set_var("SDL_VIDEO_WAYLAND_WMCLASS", APP_ID);
+    }
+    let sdl = Sdl::open(&sdl_candidates(&exe_dir))?;
+    if WEBOS {
+        sdl.hint("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
+        sdl.hint("SDL_WEBOS_ACCESS_POLICY_KEYS_EXIT", "true");
+    }
+    // SAFETY: SDL calls on the main thread in documented order.
+    if unsafe { (sdl.init)(sdl::INIT_VIDEO | sdl::INIT_EVENTS) } != 0 {
+        return Err(format!("SDL_Init: {}", sdl.error()));
+    }
+    let (window, context, es) = create_window(&sdl)?;
+    unsafe { (sdl.gl_set_swap_interval)(1) };
+    unsafe { (sdl.show_cursor)(0) };
+
+    let gl = gl::Gl::load(|name| {
+        // SAFETY: the name is NUL-terminated (the loader macro appends it).
+        unsafe { (sdl.gl_get_proc_address)(name.as_ptr().cast()) as *const _ }
+    })?;
+    log!(
+        "vision {}: {} / {} / {}",
+        env!("CARGO_PKG_VERSION"),
+        gl.string(gl::VENDOR),
+        gl.string(gl::RENDERER),
+        gl.string(gl::VERSION)
+    );
+    let mut renderer = Renderer::new(gl, es)?;
+    let mut text = Text::new(&renderer, &assets.join("fonts"))?;
+    let mut home = Home::new(&renderer);
+    let platform = Platform::start(sdl.waker());
+    platform.send(Request::Refresh);
+    log!("init: {} ms", started.elapsed().as_millis());
+
+    let mut perf = Perf::default();
+    let mut dirty = true;
+    let mut animating = false;
+    let mut last_frame = Instant::now();
+    let mut minute = u32::MAX;
+    let mut first_frame = true;
+    let mut frames = 0u32;
+    let mut event = Event::zeroed();
+
+    'main: loop {
+        // Sleep until input, worker data or the next minute while nothing animates.
+        // --frames is a benchmark: render continuously so timings cover every frame.
+        let timeout = if animating || dirty || options.frames.is_some() { 0 } else { ms_to_next_minute() };
+        let mut got = if timeout == 0 {
+            unsafe { (sdl.poll_event)(&mut event) }
+        } else {
+            unsafe { (sdl.wait_event_timeout)(&mut event, timeout) }
+        };
+        while got != 0 {
+            match event.kind() {
+                sdl::QUIT | sdl::APP_TERMINATING => break 'main,
+                sdl::KEYDOWN => {
+                    if let Some(key) = map_key(event.key_sym()) {
+                        match home.key(key, false) {
+                            Some(Action::Launch { app_id, params }) => {
+                                log!("launch {app_id}");
+                                platform.send(Request::Launch { app_id, params });
+                            }
+                            Some(Action::Exit) => break 'main,
+                            None => {}
+                        }
+                        dirty = true;
+                    }
+                    let _ = event.key_repeat();
+                }
+                sdl::WINDOWEVENT => match event.window_event() {
+                    sdl::WINDOWEVENT_SHOWN
+                    | sdl::WINDOWEVENT_EXPOSED
+                    | sdl::WINDOWEVENT_SIZE_CHANGED
+                    | sdl::WINDOWEVENT_RESTORED
+                    | sdl::WINDOWEVENT_FOCUS_GAINED => dirty = true,
+                    sdl::WINDOWEVENT_FOCUS_LOST => home.settle(),
+                    _ => {}
+                },
+                sdl::APP_DIDENTERFOREGROUND => {
+                    dirty = true;
+                    platform.send(Request::Refresh);
+                }
+                sdl::APP_DIDENTERBACKGROUND => home.settle(),
+                _ => {}
+            }
+            got = unsafe { (sdl.poll_event)(&mut event) };
+        }
+        while let Ok(update) = platform.updates.try_recv() {
+            match update {
+                Update::Apps(apps) => home.set_apps(apps),
+                Update::Inputs(inputs) => home.set_inputs(inputs),
+                Update::Icon(icon) => home.add_icon(icon, Some(&renderer)),
+                Update::Notice(message) => home.notice(message),
+            }
+            dirty = true;
+        }
+
+        let now = chrono::Local::now();
+        if now.minute() != minute {
+            minute = now.minute();
+            dirty = true;
+        }
+        // Scripted keys (previews/benchmarks): one every 12 frames once data has arrived.
+        if home.loaded && frames >= 20 && frames % 12 == 0 {
+            if let Some(key) = options.keys.get(((frames - 20) / 12) as usize) {
+                let _ = home.key(*key, true);
+                dirty = true;
+            }
+        }
+        if !dirty && !animating && options.frames.is_none() {
+            continue;
+        }
+
+        let frame_start = Instant::now();
+        let dt = frame_start.duration_since(last_frame).as_secs_f32().min(0.05);
+        last_frame = frame_start;
+        home.flush_pending_icons(&renderer);
+        animating = home.update(dt);
+        dirty = false;
+
+        let (mut w, mut h): (c_int, c_int) = (0, 0);
+        unsafe { (sdl.gl_get_drawable_size)(window, &mut w, &mut h) };
+        let before_begin = Instant::now();
+        renderer.begin((w, h), theme::BG);
+        let began = Instant::now();
+        let clock = format!("{:02}:{:02}", now.hour(), now.minute());
+        home.draw(&mut renderer, &mut text, &clock, &german_date(&now));
+        renderer.end();
+        let submitted = Instant::now();
+        let last = options.frames.is_some_and(|n| frames + 1 >= n);
+        if last {
+            if let Some(path) = &options.screenshot {
+                save_screenshot(&renderer, (w, h), path)?;
+            }
+        }
+        unsafe { (sdl.gl_swap_window)(window) };
+        let swapped = Instant::now();
+
+        if first_frame {
+            first_frame = false;
+            log!("first frame: {} ms after start", started.elapsed().as_millis());
+        }
+        if options.perf {
+            perf.record(&renderer, [frame_start, before_begin, began, submitted, swapped], text.rasterised);
+        }
+        frames += 1;
+        if options.frames.is_some_and(|n| frames >= n) {
+            break;
+        }
+    }
+
+    unsafe {
+        (sdl.gl_delete_context)(context);
+        (sdl.destroy_window)(window);
+        (sdl.quit)();
+    }
+    Ok(())
+}
+
+fn create_window(sdl: &Sdl) -> Result<(sdl::Window, sdl::GlContext, bool), String> {
+    let title = CString::new("Vision").unwrap();
+    let attempts: &[(c_int, c_int, c_int)] = if WEBOS {
+        &[(sdl::GL_CONTEXT_PROFILE_ES, 2, 0)]
+    } else {
+        &[(sdl::GL_CONTEXT_PROFILE_ES, 2, 0), (sdl::GL_CONTEXT_PROFILE_COMPATIBILITY, 2, 1)]
+    };
+    let mut last_error = String::new();
+    for &(profile, major, minor) in attempts {
+        // SAFETY: attribute setup before window creation on the main thread.
+        unsafe {
+            for (attribute, value) in [
+                (sdl::GL_CONTEXT_PROFILE_MASK, profile),
+                (sdl::GL_CONTEXT_MAJOR_VERSION, major),
+                (sdl::GL_CONTEXT_MINOR_VERSION, minor),
+                (sdl::GL_RED_SIZE, 8),
+                (sdl::GL_GREEN_SIZE, 8),
+                (sdl::GL_BLUE_SIZE, 8),
+                (sdl::GL_ALPHA_SIZE, 8),
+                (sdl::GL_DEPTH_SIZE, 0),
+                (sdl::GL_STENCIL_SIZE, 0),
+                (sdl::GL_DOUBLEBUFFER, 1),
+            ] {
+                (sdl.gl_set_attribute)(attribute, value);
+            }
+            let (w, h, flags) = if WEBOS {
+                (1920, 1080, sdl::WINDOW_OPENGL | sdl::WINDOW_FULLSCREEN | sdl::WINDOW_SHOWN)
+            } else {
+                (1280, 720, sdl::WINDOW_OPENGL | sdl::WINDOW_RESIZABLE | sdl::WINDOW_SHOWN | sdl::WINDOW_ALLOW_HIGHDPI)
+            };
+            let window = (sdl.create_window)(title.as_ptr(), sdl::WINDOWPOS_CENTERED, sdl::WINDOWPOS_CENTERED, w, h, flags);
+            if window.is_null() {
+                last_error = format!("SDL_CreateWindow: {}", sdl.error());
+                continue;
+            }
+            let context = (sdl.gl_create_context)(window);
+            if context.is_null() {
+                last_error = format!("SDL_GL_CreateContext: {}", sdl.error());
+                (sdl.destroy_window)(window);
+                continue;
+            }
+            return Ok((window, context, profile == sdl::GL_CONTEXT_PROFILE_ES));
+        }
+    }
+    Err(last_error)
+}
+
+fn sdl_candidates(exe_dir: &Path) -> Vec<PathBuf> {
+    if WEBOS {
+        vec![exe_dir.join("lib/libSDL2-2.0.so.0"), PathBuf::from("libSDL2-2.0.so.0")]
+    } else {
+        vec![
+            exe_dir.join("SDL2.dll"),
+            PathBuf::from("third_party/sdl-windows/SDL2.dll"),
+            PathBuf::from("SDL2.dll"),
+            PathBuf::from("libSDL2-2.0.so.0"),
+        ]
+    }
+}
+
+fn find_assets(exe_dir: &Path) -> Result<PathBuf, String> {
+    [exe_dir.join("assets"), PathBuf::from("assets")]
+        .into_iter()
+        .find(|p| p.join("fonts").is_dir())
+        .ok_or_else(|| "assets/fonts not found".to_string())
+}
+
+fn map_key(sym: i32) -> Option<Key> {
+    Some(match sym {
+        sdl::KEY_LEFT => Key::Left,
+        sdl::KEY_RIGHT => Key::Right,
+        sdl::KEY_UP => Key::Up,
+        sdl::KEY_DOWN => Key::Down,
+        sdl::KEY_RETURN | sdl::KEY_KP_ENTER => Key::Ok,
+        sdl::KEY_ESCAPE | sdl::KEY_BACKSPACE | sdl::KEY_AC_BACK | sdl::KEY_WEBOS_BACK => Key::Back,
+        _ => return None,
+    })
+}
+
+fn parse_key(name: &str) -> Option<Key> {
+    Some(match name.trim() {
+        "left" => Key::Left,
+        "right" => Key::Right,
+        "up" => Key::Up,
+        "down" => Key::Down,
+        "ok" => Key::Ok,
+        "back" => Key::Back,
+        _ => return None,
+    })
+}
+
+fn ms_to_next_minute() -> c_int {
+    let now = chrono::Local::now();
+    let ms = 60_000 - (now.second() * 1000 + now.timestamp_subsec_millis().min(999));
+    ms.clamp(50, 60_000) as c_int
+}
+
+fn german_date(now: &chrono::DateTime<chrono::Local>) -> String {
+    const DAYS: [&str; 7] = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
+    const MONTHS: [&str; 12] = [
+        "Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember",
+    ];
+    format!(
+        "{}, {}. {}",
+        DAYS[now.weekday().num_days_from_monday() as usize],
+        now.day(),
+        MONTHS[now.month0() as usize]
+    )
+}
+
+fn save_screenshot(renderer: &Renderer, (w, h): (c_int, c_int), path: &Path) -> Result<(), String> {
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    // SAFETY: the buffer holds w*h RGBA texels.
+    unsafe { (renderer.gl.read_pixels)(0, 0, w, h, gl::RGBA, gl::UNSIGNED_BYTE, pixels.as_mut_ptr().cast()) };
+    let row = (w * 4) as usize;
+    let flipped: Vec<u8> = pixels.chunks_exact(row).rev().flatten().copied().collect();
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+    writer.write_image_data(&flipped).map_err(|e| e.to_string())?;
+    log!("screenshot: {}", path.display());
+    Ok(())
+}
+
+/// Frame timing. `wait` is time blocked in the first GL call until the driver frees a back
+/// buffer (vsync back-pressure on Mali); `work` is the real per-frame CPU cost.
+#[derive(Default)]
+struct Perf {
+    frames: u32,
+    wait: f32,
+    work: f32,
+    work_max: f32,
+    swap: f32,
+    since: Option<Instant>,
+}
+
+impl Perf {
+    fn record(&mut self, renderer: &Renderer, [start, before_begin, began, submitted, swapped]: [Instant; 5], glyphs: u32) {
+        let ms = |a: Instant, b: Instant| b.duration_since(a).as_secs_f32() * 1000.0;
+        let work = ms(start, before_begin) + ms(began, submitted);
+        let wait = ms(before_begin, began);
+        self.frames += 1;
+        self.wait += wait;
+        self.work += work;
+        self.work_max = self.work_max.max(work);
+        self.swap += ms(submitted, swapped);
+        let since = *self.since.get_or_insert(start);
+        let elapsed = since.elapsed().as_secs_f32();
+        if elapsed >= 2.0 {
+            let n = self.frames as f32;
+            log!(
+                "perf: {:.1} fps, work avg {:.2} ms max {:.2} ms, vsync wait {:.2} ms, swap {:.2} ms, {} draws / {} quads, {} glyphs",
+                n / elapsed,
+                self.work / n,
+                self.work_max,
+                self.wait / n,
+                self.swap / n,
+                renderer.stats.draw_calls,
+                renderer.stats.quads,
+                glyphs
+            );
+            *self = Perf::default();
+        }
+    }
+}

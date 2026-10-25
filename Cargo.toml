@@ -1,0 +1,29 @@
+[package]
+name = "vision"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Vision: a fast native home launcher for rooted LG webOS TVs"
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+fontdue = "0.9"
+libloading = "0.8"
+png = "0.17"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Font rasterisation and PNG decoding stay fast in debug desktop previews.
+[profile.dev.package.fontdue]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
