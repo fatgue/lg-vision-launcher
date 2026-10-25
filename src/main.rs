@@ -134,6 +134,8 @@ fn run(started: Instant) -> Result<(), String> {
 
     let mut perf = Perf::default();
     let mut dirty = true;
+    // Hidden windows never draw: a backgrounded surface can block eglSwapBuffers indefinitely.
+    let mut visible = true;
     let mut animating = false;
     let mut last_frame = Instant::now();
     let mut minute = u32::MAX;
@@ -148,7 +150,8 @@ fn run(started: Instant) -> Result<(), String> {
     'main: loop {
         // Sleep until input, worker data or the next minute while nothing animates.
         // --frames is a benchmark: render continuously so timings cover every frame.
-        let mut timeout = if animating || dirty || options.frames.is_some() { 0 } else { ms_to_next_minute() };
+        let busy = visible && (animating || dirty || options.frames.is_some());
+        let mut timeout = if busy { 0 } else { ms_to_next_minute() };
         if let (Some(down), false) = (ok_down, long_fired) {
             let left = LONG_PRESS_MS.saturating_sub(down.elapsed().as_millis()) as c_int;
             timeout = timeout.min(left.max(1));
@@ -187,15 +190,27 @@ fn run(started: Instant) -> Result<(), String> {
                     | sdl::WINDOWEVENT_EXPOSED
                     | sdl::WINDOWEVENT_SIZE_CHANGED
                     | sdl::WINDOWEVENT_RESTORED
-                    | sdl::WINDOWEVENT_FOCUS_GAINED => dirty = true,
-                    sdl::WINDOWEVENT_FOCUS_LOST => home.settle(),
+                    | sdl::WINDOWEVENT_FOCUS_GAINED => {
+                        visible = true;
+                        dirty = true;
+                    }
+                    sdl::WINDOWEVENT_FOCUS_LOST => {
+                        visible = false;
+                        animating = false;
+                        home.settle();
+                    }
                     _ => {}
                 },
                 sdl::APP_DIDENTERFOREGROUND => {
+                    visible = true;
                     dirty = true;
                     platform.send(Request::Refresh);
                 }
-                sdl::APP_DIDENTERBACKGROUND => home.settle(),
+                sdl::APP_DIDENTERBACKGROUND => {
+                    visible = false;
+                    animating = false;
+                    home.settle();
+                }
                 _ => {}
             }
             got = unsafe { (sdl.poll_event)(&mut event) };
@@ -212,6 +227,7 @@ fn run(started: Instant) -> Result<(), String> {
                 Update::Apps(apps) => home.set_apps(apps),
                 Update::Inputs(inputs) => home.set_inputs(inputs),
                 Update::Icon(icon) => home.add_icon(icon, &renderer),
+                Update::Art(art) => home.add_art(art, &renderer),
                 Update::Notice(message) => home.notice(message),
             }
             dirty = true;
@@ -229,7 +245,7 @@ fn run(started: Instant) -> Result<(), String> {
                 dirty = true;
             }
         }
-        if !dirty && !animating && options.frames.is_none() {
+        if !visible || (!dirty && !animating && options.frames.is_none()) {
             continue;
         }
 
@@ -286,6 +302,11 @@ fn apply(home: &mut Home, platform: &Platform, key: Key) -> bool {
             platform.send(Request::Launch { app_id, params });
         }
         Some(Action::SavePrefs(prefs)) => platform.send(Request::SavePrefs(prefs)),
+        // On the TV, Back on the first tile hands over to LG's Home and Vision stays resident,
+        // so the next launch is a warm relaunch instead of a cold start.
+        Some(Action::Exit) if WEBOS => {
+            platform.send(Request::Launch { app_id: "com.webos.app.home".into(), params: None })
+        }
         Some(Action::Exit) => return true,
         None => {}
     }

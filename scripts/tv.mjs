@@ -52,7 +52,8 @@ const commands = {
   // node scripts/tv.mjs bench  → scripted navigation with frame timings in the log
   bench: () => {
     ssh(`echo "--perf --frames 420 --keys right,right,right,right,right,right,right,right,down,right,right,up,left,left,left,left" > /tmp/vision-args`);
-    ssh(`luna-send -n 1 luna://com.webos.applicationManager/close '{"id":"${id}"}' </dev/null; sleep 1`);
+    // SAM's close does not match the jailed dev process; end it directly.
+    ssh('kill $(pidof vision) 2>/dev/null; sleep 1');
     commands.launch();
     sleep(12000);
     commands.log();

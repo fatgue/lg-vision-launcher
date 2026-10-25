@@ -1,4 +1,4 @@
-// Renders the Vision mark (ring + amber core on near-black) into icon.png / icon-large.png.
+// Renders the Vision mark (ring + amber core on near-black) into the app icons and splash.
 // Dependency-free: a tiny PNG encoder over zlib, with analytic anti-aliasing.
 import { deflateSync } from 'node:zlib';
 import { writeFileSync, mkdirSync } from 'node:fs';
@@ -70,7 +70,48 @@ function icon(size) {
   ]);
 }
 
+// Launch splash: the mark centred on the app background, so LG's splash hands over to the
+// first frame without a visible jump.
+function splash(width, height) {
+  const raw = Buffer.alloc(height * (width * 3 + 1));
+  const cx = width / 2;
+  const cy = height / 2;
+  const ringR = 66;
+  const ringW = 10;
+  const coreR = 26;
+  const cover = (d) => Math.min(1, Math.max(0, 0.5 - d));
+  for (let y = 0; y < height; y++) {
+    const row = y * (width * 3 + 1);
+    raw[row] = 0;
+    for (let x = 0; x < width; x++) {
+      let col = BG;
+      const r = Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
+      if (r < ringR + ringW) {
+        const ring = cover(Math.abs(r - ringR) - ringW / 2);
+        const core = cover(r - coreR);
+        col = BG.map((v, i) => v + (RING[i] - v) * ring).map((v, i) => v + (CORE[i] - v) * core);
+      }
+      const o = row + 1 + x * 3;
+      raw[o] = col[0];
+      raw[o + 1] = col[1];
+      raw[o + 2] = col[2];
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(raw, { level: 9 })),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
 mkdirSync(join(root, 'branding'), { recursive: true });
 writeFileSync(join(root, 'branding', 'icon.png'), icon(80));
 writeFileSync(join(root, 'branding', 'icon-large.png'), icon(130));
-console.log('branding/icon.png, branding/icon-large.png');
+writeFileSync(join(root, 'branding', 'splash.png'), splash(1920, 1080));
+console.log('branding/icon.png, branding/icon-large.png, branding/splash.png');

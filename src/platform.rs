@@ -31,6 +31,7 @@ impl Platform {
     }
 }
 
+#[derive(Clone)]
 pub struct Sink {
     tx: Sender<Update>,
     waker: Waker,
@@ -79,6 +80,8 @@ mod backend {
                                 icon_path: None,
                                 bg_color: Some(color.to_string()),
                                 params: None,
+                                art_path: None,
+                                art_is_splash: false,
                             })
                             .collect(),
                     ));
@@ -109,21 +112,26 @@ mod backend {
     use super::*;
     use crate::luna::Luna;
     use crate::model::{self, App, Notice};
-    use base64::Engine;
     use serde_json::{json, Value};
     use std::collections::HashSet;
     use std::path::Path;
     use std::time::Instant;
 
-    /// Worker-side state: which icons the UI already holds, and refresh throttling.
+    /// Worker-side state: which apps' images the UI already holds, and refresh throttling.
     struct State {
         data_dir: PathBuf,
-        icons_sent: HashSet<String>,
+        images_sent: HashSet<String>,
         last_refresh: Option<Instant>,
+        images_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     pub fn run(requests: Receiver<Request>, sink: Sink, data_dir: PathBuf) {
-        let mut state = State { data_dir, icons_sent: HashSet::new(), last_refresh: None };
+        let mut state = State {
+            data_dir,
+            images_sent: HashSet::new(),
+            last_refresh: None,
+            images_busy: Default::default(),
+        };
         let mut luna = match Luna::connect() {
             Ok(luna) => luna,
             Err(error) => {
@@ -170,8 +178,9 @@ mod backend {
 
     fn refresh(luna: &mut Luna, sink: &Sink, state: &mut State) {
         let started = Instant::now();
+        let all_apps = inventory(luna, "luna://com.webos.applicationManager/listApps").ok();
         let apps = match inventory(luna, "luna://com.webos.applicationManager/listLaunchPoints") {
-            Ok(reply) => model::apps_from_launch_points(&reply, APP_ID),
+            Ok(reply) => model::apps_from_launch_points(&reply, all_apps.as_ref(), APP_ID),
             Err(error) => {
                 log!("launch points: {error}");
                 sink.send(Update::Notice(Notice::AppListUnavailable));
@@ -185,57 +194,124 @@ mod backend {
             Ok(reply) => sink.send(Update::Inputs(model::inputs_from_status(&reply))),
             Err(error) => log!("inputs: {error}"),
         }
-        let missing: Vec<App> = apps.into_iter().filter(|app| !state.icons_sent.contains(&app.id)).collect();
-        load_icons(luna, sink, &missing, &state.data_dir);
-        state.icons_sent.extend(missing.into_iter().map(|app| app.id));
-        log!("refresh incl. icons: {} ms", started.elapsed().as_millis());
+        log!("refresh: {} ms", started.elapsed().as_millis());
+
+        // Images load on their own thread (first-time decoding of 1080p splashes takes seconds),
+        // so app launches never queue behind them.
+        use std::sync::atomic::Ordering;
+        if state.images_busy.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let missing: Vec<App> = apps.into_iter().filter(|app| !state.images_sent.contains(&app.id)).collect();
+        state.images_sent.extend(missing.iter().map(|app| app.id.clone()));
+        let icons: Vec<Job> = missing.iter().filter_map(|a| a.icon_path.clone().map(|p| Job::icon(&a.id, p))).collect();
+        let art: Vec<Job> = missing
+            .iter()
+            .filter_map(|a| a.art_path.clone().map(|p| Job::art(&a.id, p, a.art_is_splash)))
+            .collect();
+        let (sink, data_dir, busy) = (sink.clone(), state.data_dir.clone(), state.images_busy.clone());
+        let _ = std::thread::Builder::new().name("images".into()).spawn(move || {
+            let mut luna = None;
+            load_images(&mut luna, &sink, &icons, &data_dir);
+            load_images(&mut luna, &sink, &art, &data_dir);
+            busy.store(false, Ordering::Release);
+        });
     }
 
-    /// Disk cache first; then direct reads; whatever the jail hides comes through one root exec.
-    fn load_icons(luna: &mut Luna, sink: &Sink, apps: &[App], data_dir: &Path) {
+    /// One image to load: an app icon or its tile artwork.
+    struct Job {
+        app_id: String,
+        source: String,
+        kind: &'static str,
+        splash: bool,
+    }
+
+    impl Job {
+        fn icon(app_id: &str, source: String) -> Self {
+            Self { app_id: app_id.to_string(), source, kind: "icons", splash: false }
+        }
+
+        fn art(app_id: &str, source: String, splash: bool) -> Self {
+            Self { app_id: app_id.to_string(), source, kind: "art", splash }
+        }
+
+        fn decode(&self, bytes: &[u8]) -> Result<model::Icon, String> {
+            if self.kind == "art" {
+                model::decode_art(&self.app_id, bytes, self.splash)
+            } else {
+                model::decode_icon(&self.app_id, bytes)
+            }
+        }
+
+        fn update(&self, image: model::Icon) -> Update {
+            if self.kind == "art" { Update::Art(image) } else { Update::Icon(image) }
+        }
+    }
+
+    /// Disk cache first, then direct reads. Files the native jail hides are copied by one
+    /// root `exec` into our own import directory and read from there.
+    fn load_images(luna: &mut Option<Luna>, sink: &Sink, jobs: &[Job], data_dir: &Path) {
+        let started = Instant::now();
         let mut blocked = Vec::new();
         let mut cached = 0;
-        for app in apps {
-            let Some(path) = &app.icon_path else { continue };
-            if let Some(icon) = crate::storage::load_icon(data_dir, &app.id, path) {
-                sink.send(Update::Icon(icon));
+        for job in jobs {
+            if crate::storage::is_unusable(data_dir, job.kind, &job.app_id, &job.source) {
                 cached += 1;
                 continue;
             }
-            match std::fs::read(path) {
-                Ok(bytes) => emit_icon(sink, &app.id, path, &bytes, data_dir),
-                Err(_) => blocked.push((app.id.clone(), path.clone())),
+            if let Some(image) = crate::storage::load_icon(data_dir, job.kind, &job.app_id, &job.source) {
+                sink.send(job.update(image));
+                cached += 1;
+                continue;
+            }
+            match std::fs::read(&job.source) {
+                Ok(bytes) => emit(sink, job, &bytes, data_dir),
+                Err(_) => blocked.push(job),
             }
         }
-        if cached > 0 {
-            log!("icons: {cached} from cache");
-        }
-        // One root exec costs ~1–3 s regardless of size, so batch generously.
-        for chunk in blocked.chunks(32) {
-            let script: String = chunk
-                .iter()
-                .map(|(_, path)| format!("echo '@@'; base64 '{}' 2>/dev/null | tr -d '\\n'; echo;", path.replace('\'', "")))
-                .collect();
-            let Ok(stdout) = exec(luna, &script) else { continue };
-            let mut blocks = stdout.split("@@").skip(1);
-            for (app_id, path) in chunk {
-                let Some(block) = blocks.next() else { break };
-                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(block.trim()) {
-                    emit_icon(sink, app_id, path, &bytes, data_dir);
+        if !blocked.is_empty() {
+            let import = data_dir.join("import");
+            if std::fs::create_dir_all(&import).is_ok() {
+                let script: String = blocked
+                    .iter()
+                    .enumerate()
+                    .map(|(i, job)| format!("cp '{}' '{}/{i}' 2>/dev/null; chmod 644 '{}/{i}' 2>/dev/null;", job.source.replace('\'', ""), import.display(), import.display()))
+                    .collect();
+                // Own LS2 connection, opened only when something must come through root.
+                if luna.is_none() {
+                    *luna = Luna::connect().map_err(|e| log!("images luna: {e}")).ok();
+                }
+                if let Some(luna) = luna.as_mut() {
+                    if let Err(error) = exec(luna, &script) {
+                        log!("image import: {error}");
+                    }
+                }
+                for (i, job) in blocked.iter().enumerate() {
+                    let file = import.join(i.to_string());
+                    if let Ok(bytes) = std::fs::read(&file) {
+                        emit(sink, job, &bytes, data_dir);
+                    }
+                    let _ = std::fs::remove_file(file);
                 }
             }
+        }
+        if let Some(job) = jobs.first() {
+            log!("{}: {} cached, {} decoded, {} via root, {} ms", job.kind, cached, jobs.len() - cached, blocked.len(), started.elapsed().as_millis());
         }
     }
 
-    fn emit_icon(sink: &Sink, app_id: &str, source: &str, bytes: &[u8], data_dir: &Path) {
-        match model::decode_icon(app_id, bytes) {
-            Ok(icon) => {
-                if let Err(error) = crate::storage::save_icon(data_dir, &icon, source) {
-                    log!("icon cache {app_id}: {error}");
+    fn emit(sink: &Sink, job: &Job, bytes: &[u8], data_dir: &Path) {
+        match job.decode(bytes) {
+            Ok(image) => {
+                if let Err(error) = crate::storage::save_icon(data_dir, job.kind, &image, &job.source) {
+                    log!("{} cache {}: {error}", job.kind, job.app_id);
                 }
-                sink.send(Update::Icon(icon));
+                sink.send(job.update(image));
             }
-            Err(error) => log!("icon {app_id}: {error}"),
+            Err(error) => {
+                log!("{} {}: {error}", job.kind, job.app_id);
+                crate::storage::mark_unusable(data_dir, job.kind, &job.app_id, &job.source);
+            }
         }
     }
 

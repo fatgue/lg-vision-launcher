@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 const ICON_CELL: i32 = 128;
 const ICON_ATLAS: i32 = 1024;
+const ART_ATLAS: i32 = 2048;
 const RAIL_TITLE_Y: f32 = 620.0;
 const RAIL_PITCH: f32 = 340.0;
 const AMBIENT_SPEED: f32 = 6.0;
@@ -165,9 +166,14 @@ pub struct Home {
     previous_hero: Option<Hero>,
     hero_t: Spring,
     icons: HashMap<String, [f32; 5]>,
+    /// Icons whose opaque border colour now fills their tile (drawn larger, seamless).
+    blended: HashMap<String, Rgba>,
+    arts: HashMap<String, [f32; 4]>,
     colors: HashMap<String, Rgba>,
     icon_atlas: Texture,
     icon_next: i32,
+    art_atlas: Texture,
+    art_next: i32,
     notice: Option<(String, Instant)>,
     pub loaded: bool,
 }
@@ -189,9 +195,13 @@ impl Home {
             previous_hero: None,
             hero_t: Spring::new(1.0, 14.0),
             icons: HashMap::new(),
+            blended: HashMap::new(),
+            arts: HashMap::new(),
             colors: HashMap::new(),
             icon_atlas: renderer.create_texture(ICON_ATLAS, ICON_ATLAS, gl::RGBA),
             icon_next: 0,
+            art_atlas: renderer.create_texture(ART_ATLAS, ART_ATLAS, gl::RGBA),
+            art_next: 0,
             notice: None,
             loaded: false,
         }
@@ -285,16 +295,47 @@ impl Home {
         self.refocus(true);
     }
 
+    fn tint_app(&mut self, app_id: &str, color: Rgba) {
+        self.colors.insert(app_id.to_string(), color);
+        for rail in [FAVORITES, HIDDEN] {
+            for tile in self.rails[rail].tiles.iter_mut().filter(|t| t.id == app_id) {
+                tile.tint(color);
+            }
+        }
+    }
+
+    /// Full-bleed tile artwork (320×180). Its colour wins over the icon's for ambient light.
+    pub fn add_art(&mut self, art: Icon, renderer: &Renderer) {
+        if let Some(color) = art.color {
+            self.tint_app(&art.app_id, Rgba::from_u8(color));
+        }
+        if self.arts.contains_key(&art.app_id) {
+            return;
+        }
+        let (cols, rows) = (ART_ATLAS / art.w as i32, ART_ATLAS / art.h as i32);
+        if self.art_next >= cols * rows {
+            return;
+        }
+        let (x, y) = ((self.art_next % cols) * art.w as i32, (self.art_next / cols) * art.h as i32);
+        self.art_next += 1;
+        renderer.upload(self.art_atlas, x, y, art.w as i32, art.h as i32, gl::RGBA, &art.pixels);
+        let a = ART_ATLAS as f32;
+        // Half-texel inset keeps linear filtering from bleeding in the neighbouring cell.
+        self.arts.insert(
+            art.app_id,
+            [(x as f32 + 0.5) / a, (y as f32 + 0.5) / a, (x as f32 + art.w as f32 - 0.5) / a, (y as f32 + art.h as f32 - 0.5) / a],
+        );
+    }
+
     /// Packs an icon into the shared atlas once and tints every tile of that app.
     pub fn add_icon(&mut self, icon: Icon, renderer: &Renderer) {
         if let Some(color) = icon.color {
-            let color = Rgba::from_u8(color);
-            self.colors.insert(icon.app_id.clone(), color);
-            for rail in [FAVORITES, HIDDEN] {
-                for tile in self.rails[rail].tiles.iter_mut().filter(|t| t.id == icon.app_id) {
-                    tile.tint(color);
-                }
+            if !self.arts.contains_key(&icon.app_id) {
+                self.tint_app(&icon.app_id, Rgba::from_u8(color));
             }
+        }
+        if let Some(edge) = icon.edge_color() {
+            self.blended.insert(icon.app_id.clone(), Rgba::from_u8(edge));
         }
         if self.icons.contains_key(&icon.app_id) {
             return;
@@ -623,8 +664,8 @@ impl Home {
 
     fn draw_rails(&self, r: &mut Renderer, text: &mut Text) {
         let lift = self.lift.value.clamp(0.0, 1.0);
-        // Three passes keep texture switches (shapes → icon atlas → glyph atlas) to a minimum.
-        for pass in 0..3 {
+        // Passes keep texture switches to a minimum: shapes → artwork → icons → glyphs.
+        for pass in 0..4 {
             for (index, rail) in self.rails.iter().enumerate() {
                 if rail.tiles.is_empty() {
                     continue;
@@ -635,7 +676,7 @@ impl Home {
                     continue;
                 }
                 let tiles_y = title_y + 66.0;
-                if pass == 2 {
+                if pass == 3 {
                     let dim = if index == self.active { 0.7 } else { 0.5 };
                     text.draw_top(r, self.rail_title(index), SAFE_X, title_y, RAIL_TITLE, TEXT.alpha(dim * alpha));
                 }
@@ -648,10 +689,19 @@ impl Home {
                     let lifted = if index == self.active && i == rail.focus { lift } else { 0.0 };
                     let scale = 1.0 + (FOCUS_SCALE - 1.0) * f + 0.05 * lifted;
                     let rect = base.scale_about(scale, 0.5, 1.0).offset(0.0, -14.0 * lifted);
-                    let view = TileView { rect, f, alpha, lifted, icon: self.icons.get(&tile.id).copied() };
+                    let view = TileView {
+                        rect,
+                        f,
+                        alpha,
+                        lifted,
+                        icon: self.icons.get(&tile.id).copied(),
+                        art: self.arts.get(&tile.id).copied(),
+                        fill: self.blended.get(&tile.id).copied(),
+                    };
                     match pass {
                         0 => draw_tile_shapes(r, tile, &view),
-                        1 => draw_tile_icon(r, self.icon_atlas, &view),
+                        1 => draw_tile_art(r, self.art_atlas, &view),
+                        2 => draw_tile_icon(r, self.icon_atlas, &view),
                         _ => draw_tile_text(r, text, tile, &view, self.strings),
                     }
                 }
@@ -712,6 +762,8 @@ struct TileView {
     alpha: f32,
     lifted: f32,
     icon: Option<[f32; 5]>,
+    art: Option<[f32; 4]>,
+    fill: Option<Rgba>,
 }
 
 fn draw_hero_block(r: &mut Renderer, text: &mut Text, hero: &Hero, alpha: f32, dy: f32, accent: Rgba) {
@@ -741,34 +793,49 @@ fn draw_tile_shapes(r: &mut Renderer, tile: &Tile, v: &TileView) {
         r.shadow(rect, TILE_RADIUS * 2.0, 80.0, tile.accent.alpha(0.45 * f * alpha));
         r.shadow(rect.offset(0.0, 30.0 + 16.0 * v.lifted), TILE_RADIUS, 60.0 + 30.0 * v.lifted, Rgba::hex(0).alpha(0.55 * f * alpha));
     }
-    r.rect(rect, TILE_RADIUS, tile.bg.fade(alpha));
-    if f < 1.0 {
-        r.stroke(rect.inflate(-0.5), TILE_RADIUS, 1.0, TEXT.alpha(0.10 * (1.0 - f) * alpha));
-    }
+    let fill = match (v.art, v.fill) {
+        (None, Some(edge)) => edge,
+        _ => tile.bg,
+    };
+    r.rect(rect, TILE_RADIUS, fill.fade(alpha));
     if let Kind::Input { connected } = tile.kind {
         let dot = if connected { CONNECTED } else { TEXT.alpha(0.3) };
         r.rect(Rect::new(rect.x + 26.0, rect.y + rect.h * 0.5 - 6.0, 12.0, 12.0), 6.0, dot.fade(alpha));
     }
 }
 
+fn draw_tile_art(r: &mut Renderer, atlas: Texture, v: &TileView) {
+    let Some(uv) = v.art else { return };
+    // Unfocused artwork sits back slightly so the focused tile reads first.
+    let light = 0.78 + 0.22 * v.f;
+    r.image(atlas, v.rect, uv, TILE_RADIUS, Rgba { r: light, g: light, b: light, a: v.alpha });
+}
+
 fn draw_tile_icon(r: &mut Renderer, atlas: Texture, v: &TileView) {
+    if v.art.is_some() {
+        return;
+    }
     let Some([u0, v0, u1, v1, aspect]) = v.icon else { return };
     let rect = v.rect;
-    let side = rect.h * 0.58;
+    // An icon whose background fills the tile is shown large: the tile becomes the logo.
+    let side = rect.h * if v.fill.is_some() { 0.86 } else { 0.58 };
     let (w, h) = if aspect >= 1.0 { (side * aspect.min(1.8), side) } else { (side, side / aspect) };
     let icon = Rect::new(rect.x + (rect.w - w) * 0.5, rect.y + (rect.h - h) * 0.5, w, h);
-    r.image(atlas, icon, [u0, v0, u1, v1], 18.0 * rect.h / 170.0, Rgba::hex(0xFFFFFF).alpha(v.alpha));
+    r.image(atlas, icon, [u0, v0, u1, v1], if v.fill.is_some() { 0.0 } else { 18.0 * rect.h / 170.0 }, Rgba::hex(0xFFFFFF).alpha(v.alpha));
 }
 
 fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: &TileView, s: &Strings) {
     let (rect, f, alpha) = (v.rect, v.f, v.alpha);
+    if f < 1.0 {
+        r.stroke(rect.inflate(-0.5), TILE_RADIUS, 1.0, TEXT.alpha(0.10 * (1.0 - f) * alpha));
+    }
     if f > 0.0 {
         let ring = TEXT.lerp(tile.accent, v.lifted);
         r.stroke(rect.inflate(RING_OFFSET + RING_WIDTH * 0.5), TILE_RADIUS + RING_OFFSET, RING_WIDTH, ring.alpha(f * alpha));
     }
     match tile.kind {
         Kind::App => {
-            if v.icon.is_none() {
+            if v.icon.is_none() && v.art.is_none() {
                 let style = fit(text, r, &tile.title, MONOGRAM, rect.w - 40.0);
                 let w = text.measure(r, &tile.title, style);
                 text.draw(r, &tile.title, rect.x + (rect.w - w) * 0.5, rect.y + rect.h * 0.5 + style.size * 0.35, style, TEXT.alpha(alpha));

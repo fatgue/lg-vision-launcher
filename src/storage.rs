@@ -2,11 +2,12 @@
 //! `/media/developer/vision` on the TV, the user's config dir on desktop.
 //!   prefs.json        favourites order and hidden apps
 //!   icons/<id>.icon   decoded icon cache (RGBA, ≤128 px, dominant colour)
+//!   art/<id>.icon     decoded tile artwork (RGBA 320×180, dominant colour)
 use crate::model::Icon;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-const ICON_MAGIC: &[u8; 4] = b"VIC1";
+const ICON_MAGIC: &[u8; 4] = b"VIC2";
 
 pub fn data_dir(webos: bool) -> PathBuf {
     if webos {
@@ -54,17 +55,17 @@ impl Prefs {
     }
 }
 
-fn icon_file(dir: &Path, app_id: &str) -> PathBuf {
+fn icon_file(dir: &Path, kind: &str, app_id: &str) -> PathBuf {
     let safe: String = app_id
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
         .collect();
-    dir.join("icons").join(format!("{safe}.icon"))
+    dir.join(kind).join(format!("{safe}.icon"))
 }
 
-/// Returns the cached icon if it was decoded from the same source path.
-pub fn load_icon(dir: &Path, app_id: &str, source: &str) -> Option<Icon> {
-    let bytes = std::fs::read(icon_file(dir, app_id)).ok()?;
+/// Returns the cached image (`kind` = "icons" or "art") if it was decoded from the same source.
+pub fn load_icon(dir: &Path, kind: &str, app_id: &str, source: &str) -> Option<Icon> {
+    let bytes = std::fs::read(icon_file(dir, kind, app_id)).ok()?;
     let (header, rest) = bytes.split_at_checked(16)?;
     if &header[0..4] != ICON_MAGIC {
         return None;
@@ -80,8 +81,8 @@ pub fn load_icon(dir: &Path, app_id: &str, source: &str) -> Option<Icon> {
     Some(Icon { app_id: app_id.to_string(), w, h, pixels: pixels.to_vec(), color })
 }
 
-pub fn save_icon(dir: &Path, icon: &Icon, source: &str) -> std::io::Result<()> {
-    let file = icon_file(dir, &icon.app_id);
+pub fn save_icon(dir: &Path, kind: &str, icon: &Icon, source: &str) -> std::io::Result<()> {
+    let file = icon_file(dir, kind, &icon.app_id);
     std::fs::create_dir_all(file.parent().unwrap())?;
     let mut bytes = Vec::with_capacity(16 + source.len() + icon.pixels.len());
     bytes.extend_from_slice(ICON_MAGIC);
@@ -95,4 +96,16 @@ pub fn save_icon(dir: &Path, icon: &Icon, source: &str) -> std::io::Result<()> {
     let temp = file.with_extension("tmp");
     std::fs::write(&temp, bytes)?;
     std::fs::rename(temp, file)
+}
+
+/// Remembers that a source yields no usable image (e.g. a splash without a logo), so it is
+/// not decoded again on every start.
+pub fn mark_unusable(dir: &Path, kind: &str, app_id: &str, source: &str) {
+    let file = icon_file(dir, kind, app_id).with_extension("none");
+    let _ = std::fs::create_dir_all(file.parent().unwrap());
+    let _ = std::fs::write(file, source);
+}
+
+pub fn is_unusable(dir: &Path, kind: &str, app_id: &str, source: &str) -> bool {
+    std::fs::read_to_string(icon_file(dir, kind, app_id).with_extension("none")).is_ok_and(|s| s == source)
 }

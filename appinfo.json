@@ -11,6 +11,7 @@
   "resolution": "1920x1080",
   "bgColor": "#07080B",
   "iconColor": "#07080B",
+  "splashBackground": "splash.png",
   "appCategory": ["home"],
   "requiredACG": ["application.launcher", "application.query", "lunabus.query"],
   "handlesRelaunch": false
