@@ -229,6 +229,38 @@ fn run(started: Instant) -> Result<(), String> {
                     }
                     None => {}
                 },
+                // Magic Remote: the pointer focuses what it is over; its button acts as OK
+                // (held = long press), the wheel steps along the row.
+                sdl::MOUSEMOTION => {
+                    let (x, y) = event.mouse_xy();
+                    let (lx, ly) = to_logical(&sdl, window, x, y);
+                    if home.pointer(lx, ly) {
+                        dirty = true;
+                    }
+                }
+                sdl::MOUSEBUTTONDOWN if event.mouse_button() == 1 => {
+                    let (x, y) = event.mouse_xy();
+                    let (lx, ly) = to_logical(&sdl, window, x, y);
+                    home.pointer(lx, ly);
+                    if home.pointer_target(lx, ly) && ok_down.is_none() {
+                        ok_down = Some(Instant::now());
+                        long_fired = false;
+                    }
+                    dirty = true;
+                }
+                sdl::MOUSEBUTTONUP if event.mouse_button() == 1 => {
+                    if ok_down.take().is_some() && !long_fired && apply(&mut home, &io, Key::Ok) {
+                        break 'main;
+                    }
+                    dirty = true;
+                }
+                sdl::MOUSEWHEEL => {
+                    let key = if event.wheel_y() > 0 { Key::Left } else { Key::Right };
+                    if apply(&mut home, &io, key) {
+                        break 'main;
+                    }
+                    dirty = true;
+                }
                 sdl::KEYUP if map_key(event.key_sym()) == Some(Key::Ok) => {
                     if ok_down.take().is_some() && !long_fired && apply(&mut home, &io, Key::Ok) {
                         break 'main;
@@ -434,6 +466,14 @@ fn open_home() {
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
 fn open_home() {}
+
+/// Window coordinates to the 1920×1080 layout space.
+fn to_logical(sdl: &Sdl, window: sdl::Window, x: i32, y: i32) -> (f32, f32) {
+    let (mut w, mut h): (c_int, c_int) = (0, 0);
+    unsafe { (sdl.get_window_size)(window, &mut w, &mut h) };
+    let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+    (x as f32 * render::LOGICAL_W / w, y as f32 * render::LOGICAL_H / h)
+}
 
 fn create_window(sdl: &Sdl) -> Result<(sdl::Window, sdl::GlContext, bool), String> {
     let title = CString::new("Vision").unwrap();

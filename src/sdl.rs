@@ -37,6 +37,10 @@ pub const APP_DIDENTERFOREGROUND: u32 = 0x106;
 pub const WINDOWEVENT: u32 = 0x200;
 pub const KEYDOWN: u32 = 0x300;
 pub const KEYUP: u32 = 0x301;
+pub const MOUSEMOTION: u32 = 0x400;
+pub const MOUSEBUTTONDOWN: u32 = 0x401;
+pub const MOUSEBUTTONUP: u32 = 0x402;
+pub const MOUSEWHEEL: u32 = 0x403;
 pub const USEREVENT: u32 = 0x8000;
 /// Lifecycle notices from SAM (code 1: relaunch, 2: close), pushed by the Luna thread.
 pub const LIFECYCLE_EVENT: u32 = 0x8001;
@@ -95,6 +99,24 @@ impl Event {
         self.bytes[12]
     }
 
+    /// SDL_MouseMotionEvent / SDL_MouseButtonEvent x, y (window coordinates).
+    pub fn mouse_xy(&self) -> (i32, i32) {
+        (
+            i32::from_ne_bytes(self.bytes[20..24].try_into().unwrap()),
+            i32::from_ne_bytes(self.bytes[24..28].try_into().unwrap()),
+        )
+    }
+
+    /// SDL_MouseButtonEvent.button (1 = left).
+    pub fn mouse_button(&self) -> u8 {
+        self.bytes[16]
+    }
+
+    /// SDL_MouseWheelEvent.y
+    pub fn wheel_y(&self) -> i32 {
+        i32::from_ne_bytes(self.bytes[20..24].try_into().unwrap())
+    }
+
     /// SDL_UserEvent.code
     pub fn user_code(&self) -> i32 {
         i32::from_ne_bytes(self.bytes[12..16].try_into().unwrap())
@@ -123,6 +145,7 @@ dynamic_api! {
         fn show_window = "SDL_ShowWindow": fn(Window);
         fn raise_window = "SDL_RaiseWindow": fn(Window);
         fn restore_window = "SDL_RestoreWindow": fn(Window);
+        fn get_window_size = "SDL_GetWindowSize": fn(Window, *mut c_int, *mut c_int);
     }
 }
 

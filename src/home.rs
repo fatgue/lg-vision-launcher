@@ -9,6 +9,7 @@ use crate::strings::{self, Strings};
 use crate::text::{Style, Text};
 use crate::theme::*;
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -188,6 +189,15 @@ enum Mode {
     Offer { yes: bool },
 }
 
+/// Something the Magic Remote pointer can hit, recorded while drawing.
+#[derive(Clone, Copy, PartialEq)]
+enum Target {
+    Tile { rail: usize, index: usize },
+    MenuItem(usize),
+    Offer(bool),
+    SetupButton,
+}
+
 struct Hero {
     eyebrow: String,
     title: String,
@@ -227,6 +237,7 @@ pub struct Home {
     art_next: usize,
     qr: Option<(String, qrcodegen::QrCode)>,
     notice: Option<(String, Instant)>,
+    hits: RefCell<Vec<(Rect, Target)>>,
     pub loaded: bool,
 }
 
@@ -273,8 +284,46 @@ impl Home {
             art_next: 0,
             qr: None,
             notice: None,
+            hits: RefCell::new(Vec::new()),
             loaded: false,
         }
+    }
+
+    // ---- Magic Remote pointer ---------------------------------------------------------
+
+    fn hit(&self, x: f32, y: f32) -> Option<Target> {
+        // Last drawn wins: overlays are drawn after the rails.
+        self.hits
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(r, _)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+            .map(|(_, t)| *t)
+    }
+
+    /// Moves focus to whatever the pointer is over. Returns true when something changed.
+    pub fn pointer(&mut self, x: f32, y: f32) -> bool {
+        let Some(target) = self.hit(x, y) else { return false };
+        let changed = match (target, &mut self.mode) {
+            (Target::Tile { rail, index }, Mode::Browse) => {
+                let changed = self.active != rail || self.rails[rail].focus != index;
+                self.active = rail;
+                self.rails[rail].focus = index;
+                changed
+            }
+            (Target::MenuItem(i), Mode::Menu(menu)) => std::mem::replace(&mut menu.focus, i) != i,
+            (Target::Offer(yes), Mode::Offer { yes: current }) => std::mem::replace(current, yes) != yes,
+            _ => false,
+        };
+        if changed {
+            self.refocus(false);
+        }
+        changed
+    }
+
+    /// Whether the pointer is over something a click activates (otherwise clicks are ignored).
+    pub fn pointer_target(&self, x: f32, y: f32) -> bool {
+        self.hit(x, y).is_some()
     }
 
     fn rail_title(&self, rail: usize) -> &'static str {
@@ -1055,6 +1104,7 @@ impl Home {
     // ---- Drawing --------------------------------------------------------------------
 
     pub fn draw(&mut self, r: &mut Renderer, text: &mut Text, clock: &str, date: &str) {
+        self.hits.borrow_mut().clear();
         self.draw_backdrop(r);
         self.draw_header(r, text, clock, date);
         self.draw_hero(r, text);
@@ -1142,6 +1192,9 @@ impl Home {
                         art: self.arts.get(&tile.id).map(|(_, uv)| *uv),
                         fill: self.blended.get(&tile.id).copied(),
                     };
+                    if pass == 0 && alpha > 0.5 && matches!(self.mode, Mode::Browse) {
+                        self.hits.borrow_mut().push((rect, Target::Tile { rail: index, index: i }));
+                    }
                     match pass {
                         0 => draw_tile_shapes(r, tile, &view),
                         1 => draw_tile_art(r, self.art_atlas, &view),
@@ -1180,6 +1233,9 @@ impl Home {
         let panel = Rect::new(x, y, width, height);
         draw_panel(r, panel, open);
         let row = |i: usize| Rect::new(x + pad, y + 64.0 + pad + i as f32 * row_h, width - 2.0 * pad, row_h - 8.0);
+        for i in 0..menu.items.len() {
+            self.hits.borrow_mut().push((row(i), Target::MenuItem(i)));
+        }
         r.rect(row(menu.focus), 16.0, TEXT.alpha(open));
         text.draw_top(r, &tile.title, x + 28.0, y + 24.0, MENU_TITLE, TEXT.alpha(0.6 * open));
         for (i, item) in menu.items.iter().enumerate() {
@@ -1213,7 +1269,8 @@ impl Home {
                     text.draw_top(r, s.home_assistant, x, y, SETUP_TITLE, a(1.0));
                     y += 90.0;
                     text.draw_top(r, &format!("{} {url}", s.connected_to), x, y, SETUP_BODY, a(0.8));
-                    draw_button(r, text, s.disconnect, x, panel.y + panel.h - 140.0, open);
+                    let button = draw_button(r, text, s.disconnect, x, panel.y + panel.h - 140.0, open);
+                    self.hits.borrow_mut().push((button, Target::SetupButton));
                 } else {
                     text.draw_top(r, s.ha_setup_title, x, y, SETUP_TITLE, a(1.0));
                     y += 96.0;
@@ -1243,7 +1300,8 @@ impl Home {
                     text.draw_top(r, s.plex, x, y, SETUP_TITLE, a(1.0));
                     y += 90.0;
                     text.draw_top(r, &format!("{} {account}", s.connected_to), x, y, SETUP_BODY, a(0.8));
-                    draw_button(r, text, s.disconnect, x, panel.y + panel.h - 140.0, open);
+                    let button = draw_button(r, text, s.disconnect, x, panel.y + panel.h - 140.0, open);
+                    self.hits.borrow_mut().push((button, Target::SetupButton));
                 } else {
                     text.draw_top(r, s.plex_setup_title, x, y, SETUP_TITLE, a(1.0));
                     y += 96.0;
@@ -1292,6 +1350,7 @@ impl Home {
         for (label, focused) in [(s.turn_on, yes), (s.not_now, !yes)] {
             let w = text.measure(r, label, MENU_ITEM) + 72.0;
             let rect = Rect::new(bx, by, w, 64.0);
+            self.hits.borrow_mut().push((rect, Target::Offer(label == s.turn_on)));
             if focused {
                 r.rect(rect, 32.0, TEXT.alpha(open));
             } else {
@@ -1343,11 +1402,12 @@ fn draw_panel(r: &mut Renderer, panel: Rect, open: f32) {
     r.stroke(panel, 22.0, 1.0, TEXT.alpha(0.14 * open));
 }
 
-fn draw_button(r: &mut Renderer, text: &mut Text, label: &str, x: f32, y: f32, open: f32) {
+fn draw_button(r: &mut Renderer, text: &mut Text, label: &str, x: f32, y: f32, open: f32) -> Rect {
     let w = text.measure(r, label, MENU_ITEM) + 72.0;
     let rect = Rect::new(x, y, w, 64.0);
     r.rect(rect, 32.0, TEXT.alpha(open));
     text.draw(r, label, x + 36.0, y + 42.0, MENU_ITEM, BG.alpha(open));
+    rect
 }
 
 /// QR modules as merged horizontal runs on a white quiet-zone card.
