@@ -49,6 +49,8 @@ const LG_HOME_EXE: &str = "/usr/bin/com.webos.app.home";
 const INSTALL_DIR: &str = "/media/developer/apps/usr/palm/applications/com.vision.launcher";
 /// Written while Vision is Home: a normal tile launch then opens the Home instance instead.
 const HOME_MARKER: &str = "/var/run/vision-home";
+/// Lifecycle code (with 1 = relaunch, 2 = close): another app is starting.
+const LIFECYCLE_OTHER_APP: i32 = 3;
 /// Logical pixels the Magic Remote pointer must travel after a key press to take the focus back.
 const POINTER_UNLOCK: f32 = 24.0;
 
@@ -225,6 +227,13 @@ fn run(started: Instant) -> Result<(), String> {
             match event.kind() {
                 sdl::QUIT | sdl::APP_TERMINATING => break 'main,
                 sdl::LIFECYCLE_EVENT if event.user_code() == 2 => break 'main,
+                sdl::LIFECYCLE_EVENT if event.user_code() == LIFECYCLE_OTHER_APP => {
+                    if home.pause_preview() {
+                        log!("preview: released, another app is starting");
+                    }
+                    io.video.release();
+                    dirty = true;
+                }
                 sdl::LIFECYCLE_EVENT => {
                     // Home key: SAM relaunches the running Home, which brings itself forward.
                     unsafe {
@@ -511,7 +520,21 @@ fn register_home(waker: sdl::Waker) -> Result<Option<video::Bus>, String> {
             _ => {}
         }
     });
-    luna::subscribe(Some(HOME_ID), "luna://com.webos.applicationManager/registerApp", &serde_json::json!({ "id": HOME_ID }), sink).map(Some)
+    // Any other app starting (from Vision, a remote button, an input switch…): free the video
+    // decoder before that app asks for it. SAM reports the splash before the app loads media.
+    let life = Box::new(move |message: serde_json::Value| {
+        let event = message.get("event").and_then(|v| v.as_str());
+        let app = message.get("appId").and_then(|v| v.as_str()).unwrap_or_default();
+        if matches!(event, Some("splash" | "launch")) && !app.is_empty() && app != HOME_ID && app != APP_ID {
+            log!("app starting: {app}");
+            waker.lifecycle(LIFECYCLE_OTHER_APP);
+        }
+    });
+    let calls = vec![
+        ("luna://com.webos.applicationManager/registerApp", serde_json::json!({ "id": HOME_ID }), sink as Box<dyn FnMut(serde_json::Value) + Send>),
+        ("luna://com.webos.applicationManager/getAppLifeEvents", serde_json::json!({ "subscribe": true }), life),
+    ];
+    luna::subscribe(Some(HOME_ID), calls).map(Some)
 }
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]

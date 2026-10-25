@@ -39,6 +39,8 @@ const HIDDEN: usize = 8;
 pub const PREVIEW_RECT: Rect = Rect::new(1000.0, 150.0, 824.0, 464.0);
 /// Focus must rest this long on a channel before its preview starts.
 const PREVIEW_DWELL: Duration = Duration::from_millis(900);
+/// No preview this long after another app started, so it never races that app for the decoder.
+const PREVIEW_PAUSE: Duration = Duration::from_secs(5);
 const DIGIT_WAIT: Duration = Duration::from_millis(1600);
 const PLEX_APP: &str = "cdp-30";
 /// TiviOne's store page: pictures live in one texture of 2×3 cells, 960×540 each.
@@ -364,6 +366,8 @@ pub struct Home {
     /// Channel whose live preview is playing, and where focus currently rests.
     preview: Option<i64>,
     dwell: Option<(i64, Instant)>,
+    /// Set when another app starts: no preview until then (or until Vision is shown again).
+    preview_paused_until: Option<Instant>,
     visible: bool,
     /// The TV's own UI language (read once).
     system_language: String,
@@ -437,6 +441,7 @@ impl Home {
             pending: Vec::new(),
             preview: None,
             dwell: None,
+            preview_paused_until: None,
             visible: true,
             system_language: crate::strings::system_language(),
             vscroll: Spring::new(0.0, 14.0),
@@ -1041,10 +1046,20 @@ impl Home {
         (!self.pending.is_empty()).then(|| self.pending.remove(0))
     }
 
+    /// Another app is starting: the caller releases the decoder; no preview for a few seconds,
+    /// or until Vision is shown again. Returns whether a preview was playing.
+    pub fn pause_preview(&mut self) -> bool {
+        self.dwell = None;
+        self.preview_paused_until = Some(Instant::now() + PREVIEW_PAUSE);
+        self.preview.take().is_some()
+    }
+
     /// Visibility of Vision's window: a hidden Home stops its preview at once.
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
-        if !visible {
+        if visible {
+            self.preview_paused_until = None;
+        } else {
             self.dwell = None;
             if self.preview.take().is_some() {
                 self.pending.push(Action::Preview(None));
@@ -1056,7 +1071,12 @@ impl Home {
     fn update_preview(&mut self) {
         let wanted = match (self.focused().map(|t| t.kind), &self.tv) {
             (Some(Kind::Channel { id }), Some(tv))
-                if self.visible && self.prefs.ui.preview && matches!(self.mode, Mode::Browse) && !self.header && tv.streams.contains_key(&id) =>
+                if self.visible
+                    && self.prefs.ui.preview
+                    && self.preview_paused_until.is_none_or(|until| Instant::now() >= until)
+                    && matches!(self.mode, Mode::Browse)
+                    && !self.header
+                    && tv.streams.contains_key(&id) =>
             {
                 Some(id)
             }

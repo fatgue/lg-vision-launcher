@@ -212,11 +212,13 @@ impl Remote {
     }
 }
 
-/// Holds a subscription on its own connection and thread for the life of the process
-/// (SAM's registerApp: the lifecycle of Vision as Home).
-pub fn subscribe(name: Option<&'static str>, uri: &str, payload: &Value, sink: Sink) -> Result<Remote, String> {
-    let uri = CString::new(uri).map_err(|_| "bad uri")?;
-    let payload = CString::new(payload.to_string()).map_err(|_| "bad payload")?;
+/// Holds subscriptions on one connection and thread for the life of the process (as Home:
+/// SAM's registerApp and app life events, on the only LS2 name LG's role allows).
+pub fn subscribe(name: Option<&'static str>, calls: Vec<(&str, Value, Sink)>) -> Result<Remote, String> {
+    let calls = calls
+        .into_iter()
+        .map(|(uri, payload, sink)| Ok((CString::new(uri).map_err(|_| "bad uri")?, CString::new(payload.to_string()).map_err(|_| "bad payload")?, sink)))
+        .collect::<Result<Vec<_>, String>>()?;
     let (started, handshake) = std::sync::mpsc::sync_channel::<Result<Remote, String>>(1);
     let (tx, requests) = std::sync::mpsc::channel::<Request>();
     std::thread::Builder::new()
@@ -226,13 +228,15 @@ pub fn subscribe(name: Option<&'static str>, uri: &str, payload: &Value, sink: S
                 Ok(luna) => luna,
                 Err(error) => return drop(started.send(Err(error))),
             };
-            let userdata = Box::into_raw(Box::new(Subscription { payload_fn: luna.ls.message_payload, sink }));
-            let mut token: c_ulong = 0;
-            let mut error = luna.ls.new_error();
-            // SAFETY: strings outlive the call; the leaked subscription lives as long as the process.
-            let ok = unsafe { (luna.ls.call)(luna.handle, uri.as_ptr(), payload.as_ptr(), on_message, userdata.cast(), &mut token, &mut error) };
-            if !ok {
-                return drop(started.send(Err(luna.ls.describe(error, "subscription"))));
+            for (uri, payload, sink) in calls {
+                let userdata = Box::into_raw(Box::new(Subscription { payload_fn: luna.ls.message_payload, sink }));
+                let mut token: c_ulong = 0;
+                let mut error = luna.ls.new_error();
+                // SAFETY: strings outlive the call; the leaked subscription lives as long as the process.
+                let ok = unsafe { (luna.ls.call)(luna.handle, uri.as_ptr(), payload.as_ptr(), on_message, userdata.cast(), &mut token, &mut error) };
+                if !ok {
+                    return drop(started.send(Err(luna.ls.describe(error, "subscription"))));
+                }
             }
             let _ = started.send(Ok(Remote { tx, context: luna.context as usize, wakeup: luna.glib.context_wakeup }));
             loop {
