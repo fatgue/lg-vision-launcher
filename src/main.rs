@@ -4,6 +4,7 @@
 //! running animation) and otherwise sleeps in SDL_WaitEventTimeout: 0 % GPU when idle.
 mod anim;
 mod color;
+mod clock;
 mod companion;
 mod config;
 mod dynlib;
@@ -63,6 +64,8 @@ struct Options {
     frames: Option<u32>,
     screenshot: Option<PathBuf>,
     keys: Vec<Key>,
+    /// Seconds per frame instead of the measured time (reproducible screenshots).
+    fixed_dt: Option<f32>,
 }
 
 fn main() {
@@ -105,7 +108,12 @@ fn run(started: Instant) -> Result<(), String> {
             .and_then(|i| args.get(i + 1))
             .map(|list| list.split(',').filter_map(parse_key).collect())
             .unwrap_or_default(),
+        fixed_dt: args.iter().position(|a| a == "--fixed-dt").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()),
     };
+    // --now <unix-ms>: a fixed wall clock (reproducible screenshots).
+    if let Some(ms) = args.iter().position(|a| a == "--now").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()) {
+        clock::fix(ms);
+    }
     // --releases <url>: TiviOne's release manifest from a test server.
     if let Some(url) = args.iter().position(|a| a == "--releases").and_then(|i| args.get(i + 1)) {
         installer::set_manifest(url.clone());
@@ -413,7 +421,7 @@ fn run(started: Instant) -> Result<(), String> {
             dirty = true;
         }
 
-        let now = chrono::Local::now();
+        let now = clock::local();
         if now.minute() != minute {
             minute = now.minute();
             home.tick();
@@ -431,7 +439,7 @@ fn run(started: Instant) -> Result<(), String> {
         }
 
         let frame_start = Instant::now();
-        let dt = frame_start.duration_since(last_frame).as_secs_f32().min(0.05);
+        let dt = options.fixed_dt.unwrap_or_else(|| frame_start.duration_since(last_frame).as_secs_f32().min(0.05));
         last_frame = frame_start;
         animating = home.update(dt) || home.waiting();
         while let Some(action) = home.take_action() {

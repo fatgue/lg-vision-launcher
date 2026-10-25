@@ -1866,7 +1866,7 @@ impl Home {
     /// "LIVE · 1 · Das Erste" / programme title / times and what follows.
     fn channel_hero(&self, tile: &Tile, id: i64, tv: &TvFeed) -> Hero {
         let s = self.strings;
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = crate::clock::utc_ms();
         let channel = tv.channels.get(&id);
         let name = channel.map(|c| c.name.as_str()).unwrap_or(&tile.title);
         let number = channel.and_then(|c| c.number).map(|n| format!("{n} · ")).unwrap_or_default();
@@ -2111,7 +2111,7 @@ impl Home {
 
     fn channel_now(&self, tile: &Tile) -> Option<(String, f32)> {
         let Kind::Channel { id } = tile.kind else { return None };
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = crate::clock::utc_ms();
         let (now, _) = self.tv.as_ref()?.now_next(id, now_ms);
         let now = now?;
         let progress = (now_ms - now.start) as f32 / (now.end - now.start).max(1) as f32;
@@ -2909,7 +2909,7 @@ fn entity_state(s: &Strings, e: &Entity) -> String {
 fn day_label(s: &Strings, ms: i64) -> String {
     use chrono::{Datelike, TimeZone};
     let Some(then) = chrono::Local.timestamp_millis_opt(ms).single() else { return String::new() };
-    let today = chrono::Local::now().date_naive();
+    let today = crate::clock::local().date_naive();
     match (today - then.date_naive()).num_days() {
         0 => s.today.to_string(),
         1 => s.yesterday.to_string(),
