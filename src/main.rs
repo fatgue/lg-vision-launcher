@@ -49,6 +49,8 @@ const LG_HOME_EXE: &str = "/usr/bin/com.webos.app.home";
 const INSTALL_DIR: &str = "/media/developer/apps/usr/palm/applications/com.vision.launcher";
 /// Written while Vision is Home: a normal tile launch then opens the Home instance instead.
 const HOME_MARKER: &str = "/var/run/vision-home";
+/// Logical pixels the Magic Remote pointer must travel after a key press to take the focus back.
+const POINTER_UNLOCK: f32 = 24.0;
 
 fn runs_as_home() -> bool {
     WEBOS && std::env::current_exe().is_ok_and(|exe| exe == Path::new(LG_HOME_EXE))
@@ -146,7 +148,7 @@ fn run(started: Instant) -> Result<(), String> {
     }
     let (window, context, es) = create_window(&sdl)?;
     unsafe { (sdl.gl_set_swap_interval)(1) };
-    unsafe { (sdl.show_cursor)(0) };
+    // The Magic Remote pointer stays visible: webOS draws it and hides it on key presses.
 
     let gl = gl::Gl::load(|name| {
         // SAFETY: the name is NUL-terminated (the loader macro appends it).
@@ -201,6 +203,9 @@ fn run(started: Instant) -> Result<(), String> {
     const LONG_PRESS_MS: u128 = 550;
     let mut ok_down: Option<Instant> = None;
     let mut long_fired = false;
+    // After a key press the pointer takes over again only once it really moves, so a resting
+    // remote's jitter never pulls the focus away from where the keys put it.
+    let mut pointer_lock: Option<Option<(f32, f32)>> = None;
 
     'main: loop {
         // Sleep until input, worker data or the next minute while nothing animates.
@@ -234,31 +239,51 @@ fn run(started: Instant) -> Result<(), String> {
                     dirty = true;
                     platform.send(Request::Refresh);
                 }
-                sdl::KEYDOWN => match map_key(event.key_sym(), event.key_scancode()) {
-                    Some(Key::Ok) => {
-                        if !event.key_repeat() && ok_down.is_none() {
-                            ok_down = Some(Instant::now());
-                            long_fired = false;
-                        }
+                sdl::KEYDOWN => {
+                    let key = map_key(event.key_sym(), event.key_scancode());
+                    if key.is_some() {
+                        // Keys own the focus until the pointer really moves again.
+                        pointer_lock.get_or_insert(None);
                     }
-                    Some(key) => {
-                        if apply(&mut home, &io, key) {
-                            break 'main;
+                    match key {
+                        Some(Key::Ok) => {
+                            if !event.key_repeat() && ok_down.is_none() {
+                                ok_down = Some(Instant::now());
+                                long_fired = false;
+                            }
                         }
-                        dirty = true;
+                        Some(key) => {
+                            if apply(&mut home, &io, key) {
+                                break 'main;
+                            }
+                            dirty = true;
+                        }
+                        None => log!("key: unmapped sym {:#x} scancode {}", event.key_sym(), event.key_scancode()),
                     }
-                    None => log!("key: unmapped sym {:#x} scancode {}", event.key_sym(), event.key_scancode()),
-                },
+                }
                 // Magic Remote: the pointer focuses what it is over; its button acts as OK
                 // (held = long press), the wheel steps along the row.
                 sdl::MOUSEMOTION => {
                     let (x, y) = event.mouse_xy();
                     let (lx, ly) = to_logical(&sdl, window, x, y);
-                    if home.pointer(lx, ly) {
-                        dirty = true;
+                    let moved = match pointer_lock {
+                        None => true,
+                        // First position after the key press: remember it.
+                        Some(None) => {
+                            pointer_lock = Some(Some((lx, ly)));
+                            false
+                        }
+                        Some(Some((ax, ay))) => (lx - ax).hypot(ly - ay) > POINTER_UNLOCK,
+                    };
+                    if moved {
+                        pointer_lock = None;
+                        if home.pointer(lx, ly) {
+                            dirty = true;
+                        }
                     }
                 }
                 sdl::MOUSEBUTTONDOWN if event.mouse_button() == 1 => {
+                    pointer_lock = None;
                     let (x, y) = event.mouse_xy();
                     let (lx, ly) = to_logical(&sdl, window, x, y);
                     home.pointer(lx, ly);

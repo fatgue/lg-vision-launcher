@@ -146,7 +146,6 @@ dynamic_api! {
         fn poll_event = "SDL_PollEvent": fn(*mut Event) -> c_int;
         fn wait_event_timeout = "SDL_WaitEventTimeout": fn(*mut Event, c_int) -> c_int;
         fn push_event = "SDL_PushEvent": fn(*mut Event) -> c_int;
-        fn show_cursor = "SDL_ShowCursor": fn(c_int) -> c_int;
         fn show_window = "SDL_ShowWindow": fn(Window);
         fn raise_window = "SDL_RaiseWindow": fn(Window);
         fn restore_window = "SDL_RestoreWindow": fn(Window);
