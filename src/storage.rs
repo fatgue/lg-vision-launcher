@@ -44,6 +44,8 @@ pub struct UiPrefs {
     pub preview: bool,
     /// UI language code; empty follows the TV.
     pub language: String,
+    /// The TiviOne tile on Home while TiviOne is not installed (the user can hide it).
+    pub tivione_promo: bool,
 }
 
 impl Default for UiPrefs {
@@ -58,6 +60,7 @@ impl Default for UiPrefs {
             reduced_motion: false,
             preview: true,
             language: String::new(),
+            tivione_promo: true,
         }
     }
 }
@@ -94,6 +97,7 @@ impl Prefs {
             reduced_motion: flag("reducedMotion", defaults.reduced_motion),
             preview: flag("preview", defaults.preview),
             language: ui.and_then(|u| u.get("language")).and_then(Value::as_str).unwrap_or_default().to_string(),
+            tivione_promo: flag("tivionePromo", defaults.tivione_promo),
         };
         Self { order: list("order"), hidden: list("hidden"), ui }
     }
@@ -117,6 +121,7 @@ impl Prefs {
                 "reducedMotion": ui.reduced_motion,
                 "preview": ui.preview,
                 "language": ui.language,
+                "tivionePromo": ui.tivione_promo,
             },
         });
         std::fs::write(&temp, serde_json::to_vec_pretty(&body).unwrap_or_default())?;

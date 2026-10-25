@@ -9,6 +9,7 @@ mod config;
 mod dynlib;
 mod gl;
 mod home;
+mod installer;
 mod log;
 #[cfg(all(target_os = "linux", target_arch = "arm"))]
 mod luna;
@@ -101,6 +102,10 @@ fn run(started: Instant) -> Result<(), String> {
             .map(|list| list.split(',').filter_map(parse_key).collect())
             .unwrap_or_default(),
     };
+    // --releases <url>: TiviOne's release manifest from a test server.
+    if let Some(url) = args.iter().position(|a| a == "--releases").and_then(|i| args.get(i + 1)) {
+        installer::set_manifest(url.clone());
+    }
     let home_mode = runs_as_home();
     let exe_dir = if home_mode {
         PathBuf::from(INSTALL_DIR)
@@ -341,6 +346,10 @@ fn run(started: Instant) -> Result<(), String> {
                 Update::Media(items) => home.set_media(items),
                 Update::Status(status) => home.set_status(status),
                 Update::Tv(feed) => home.set_tv(feed),
+                Update::TiviOne(installed) => home.set_tivione(installed),
+                Update::Release(release) => home.set_release(release),
+                Update::Install(state) => home.set_install(state),
+                Update::Picture(picture) => home.add_picture(picture, &renderer),
                 Update::TvPair(key) => platform.send(Request::Launch {
                     app_id: model::TIVIONE_APP.into(),
                     params: Some(serde_json::json!({ "launcherPair": { "key": key } })),
@@ -444,6 +453,13 @@ fn dispatch(action: Action, io: &Io) -> bool {
         Some(Action::Service(request)) => io.services.send(request),
         Some(Action::HomeTakeover(on)) => platform.send(Request::HomeTakeover(on)),
         Some(Action::RefreshImages) => platform.send(Request::RefreshImages),
+        Some(Action::Refresh) => platform.send(Request::Refresh),
+        Some(Action::Install(release)) => {
+            // The installer may end a running TiviOne; free the decoder like a launch does.
+            io.video.hide();
+            platform.send(Request::Install(release));
+        }
+        Some(Action::Pictures(release)) => platform.send(Request::Pictures(release)),
         // On the TV, Back on the first tile hands over to LG's Home and Vision stays resident,
         // so the next launch is a warm relaunch instead of a cold start.
         Some(Action::Exit) if WEBOS => {

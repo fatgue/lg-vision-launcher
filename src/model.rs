@@ -82,6 +82,12 @@ pub enum Update {
     Tv(Option<TvFeed>),
     /// Integration switched on: launch TiviOne once with this key to pair.
     TvPair(String),
+    /// TiviOne on this TV (None: not installed).
+    TiviOne(Option<Installed>),
+    /// The newest release on TiviOne's website (None: unknown or unreachable).
+    Release(Option<Release>),
+    Install(InstallState),
+    Picture(Picture),
 }
 
 /// TiviOne's home-screen snapshot (see tivione/src/core/launcher.ts).
@@ -328,6 +334,78 @@ pub enum ServiceRequest {
 }
 
 pub const TIVIONE_APP: &str = "com.tivione.tv";
+/// The first TiviOne with the launcher feed; older versions only open.
+pub const TIVIONE_FEED_VERSION: &str = "1.0.1";
+
+/// A TiviOne release for direct install, from the signed manifest on TiviOne's website.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Release {
+    pub version: String,
+    pub url: String,
+    pub sha256: [u8; 32],
+    pub size: u64,
+    /// Pictures for the store page: the banner, then screenshots.
+    pub pictures: Vec<String>,
+}
+
+/// TiviOne as installed: its version, and whether it is a developer install (from the
+/// website, kept up to date by Vision) rather than LG's store.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Installed {
+    pub version: String,
+    pub direct: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum InstallState {
+    Idle,
+    Downloading(f32),
+    Installing,
+    Done,
+    Failed(InstallFailure),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum InstallFailure {
+    Network,
+    /// The download did not match the signed manifest.
+    Damaged,
+    /// No root: Homebrew Channel cannot run the installer.
+    NeedsRoot,
+    /// The TV's installer refused the package.
+    Refused,
+}
+
+/// One store-page picture, decoded: `index` 0 is the banner, then the screenshots.
+pub struct Picture {
+    pub index: usize,
+    pub rgba: Vec<u8>,
+    pub w: usize,
+    pub h: usize,
+}
+
+/// TiviOne in `listApps`: version, and a developer install when it lives in the developer
+/// app directory (where Vision's own installs land).
+pub fn tivione_from_apps(reply: &Value) -> Option<Installed> {
+    let app = reply.get("apps")?.as_array()?.iter().find(|a| a.get("id").and_then(Value::as_str) == Some(TIVIONE_APP))?;
+    Some(Installed {
+        version: app.get("version").and_then(Value::as_str).unwrap_or_default().to_string(),
+        direct: app.get("folderPath").and_then(Value::as_str).is_some_and(|p| p.starts_with("/media/developer/")),
+    })
+}
+
+/// Dotted version comparison ("1.0.10" > "1.0.9"); missing parts count as 0.
+pub fn version_newer(a: &str, b: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> { v.split('.').map(|p| p.trim().parse().unwrap_or(0)).collect() };
+    let (a, b) = (parts(a), parts(b));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
 
 pub enum Request {
     Refresh,
@@ -337,6 +415,10 @@ pub enum Request {
     RefreshImages,
     Launch { app_id: String, params: Option<Value> },
     SavePrefs(crate::storage::Prefs),
+    /// Download, verify and install this TiviOne release (root, via Homebrew Channel).
+    Install(Release),
+    /// Fetch and decode the store page's pictures.
+    Pictures(Release),
 }
 
 /// Normalises `listLaunchPoints` (LG's Home bar, already in the user's order), taking each

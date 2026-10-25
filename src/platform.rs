@@ -65,9 +65,16 @@ mod backend {
     use crate::model::{App, Input, Notice};
 
     pub fn run(requests: Receiver<Request>, sink: Sink, data_dir: PathBuf) {
+        let mut release_checked = false;
         for request in requests {
             match request {
                 Request::Refresh => {
+                    // Desktop: TiviOne is never installed, so the store page shows; the real release
+                    // manifest (or --releases) feeds it.
+                    sink.send(Update::TiviOne(None));
+                    if !std::mem::replace(&mut release_checked, true) {
+                        crate::installer::check(sink.clone());
+                    }
                     let apps = [
                         ("plex", "Plex", "#E5A00D"),
                         ("netflix", "Netflix", "#E50914"),
@@ -111,6 +118,8 @@ mod backend {
                 Request::HomeTakeover(on) => log!("preview: home takeover {on}"),
                 Request::RefreshImages => log!("preview: refresh images"),
                 Request::SavePrefs(prefs) => save_prefs(&prefs, &data_dir),
+                Request::Install(release) => crate::installer::install(release, data_dir.clone(), sink.clone()),
+                Request::Pictures(release) => crate::installer::pictures(release, data_dir.clone(), sink.clone()),
             }
         }
     }
@@ -132,6 +141,8 @@ mod backend {
         images_sent: HashSet<String>,
         last_refresh: Option<Instant>,
         images_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        /// When TiviOne's website was last asked for a new release.
+        release_checked: Option<Instant>,
     }
 
     pub fn run(requests: Receiver<Request>, sink: Sink, data_dir: PathBuf) {
@@ -140,6 +151,7 @@ mod backend {
             images_sent: HashSet::new(),
             last_refresh: None,
             images_busy: Default::default(),
+            release_checked: None,
         };
         let mut luna = match Luna::connect() {
             Ok(luna) => luna,
@@ -161,6 +173,8 @@ mod backend {
                 }
                 Request::Launch { app_id, params } => launch(&mut luna, &sink, &app_id, params),
                 Request::SavePrefs(prefs) => save_prefs(&prefs, &state.data_dir),
+                Request::Install(release) => crate::installer::install(release, state.data_dir.clone(), sink.clone()),
+                Request::Pictures(release) => crate::installer::pictures(release, state.data_dir.clone(), sink.clone()),
                 Request::HomeTakeover(on) => {
                     // As root through Homebrew Channel; while Vision is Home, disabling ends
                     // this very process (LG Home takes over), enabling restarts it as Home.
@@ -219,6 +233,14 @@ mod backend {
         };
         log!("inventory: {} apps in {} ms", apps.len(), started.elapsed().as_millis());
         sink.send(Update::Apps(apps.clone()));
+        if let Some(all_apps) = &all_apps {
+            sink.send(Update::TiviOne(model::tivione_from_apps(all_apps)));
+        }
+        // New TiviOne releases: at most every six hours, on a foreground refresh.
+        if state.release_checked.is_none_or(|t| t.elapsed().as_secs() > 6 * 3600) {
+            state.release_checked = Some(Instant::now());
+            crate::installer::check(sink.clone());
+        }
 
         match inventory(luna, "luna://com.webos.service.eim/getAllInputStatus") {
             Ok(reply) => sink.send(Update::Inputs(model::inputs_from_status(&reply))),

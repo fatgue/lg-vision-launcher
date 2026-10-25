@@ -2,7 +2,10 @@
 use crate::anim::Spring;
 use crate::color::Rgba;
 use crate::gl;
-use crate::model::{App, Entity, HaCategory, Icon, Input, MediaItem, Notice, ServiceRequest, Status, TvFeed, Weather, TIVIONE_APP};
+use crate::model::{
+    version_newer, App, Entity, HaCategory, Icon, Input, InstallFailure, InstallState, Installed, MediaItem, Notice, Picture, Release, ServiceRequest,
+    Status, TvFeed, Weather, TIVIONE_APP, TIVIONE_FEED_VERSION,
+};
 use crate::video::Stream;
 use std::collections::HashSet;
 use crate::render::{Rect, Renderer, Texture, LOGICAL_H, LOGICAL_W};
@@ -38,6 +41,10 @@ pub const PREVIEW_RECT: Rect = Rect::new(1000.0, 150.0, 824.0, 464.0);
 const PREVIEW_DWELL: Duration = Duration::from_millis(900);
 const DIGIT_WAIT: Duration = Duration::from_millis(1600);
 const PLEX_APP: &str = "cdp-30";
+/// TiviOne's store page: pictures live in one texture of 2×3 cells, 960×540 each.
+const PICTURE_CELL: (i32, i32) = (960, 540);
+const PICTURE_ATLAS: (i32, i32) = (1920, 1620);
+const TIVIONE_TEAL: Rgba = Rgba::hex(0x2DD4BF);
 
 pub enum Action {
     Launch { app_id: String, params: Option<Value> },
@@ -45,6 +52,12 @@ pub enum Action {
     Service(ServiceRequest),
     HomeTakeover(bool),
     RefreshImages,
+    /// Read the app list again (after TiviOne was installed).
+    Refresh,
+    /// Download, verify and install TiviOne from its website.
+    Install(Release),
+    /// Load the pictures for TiviOne's store page.
+    Pictures(Release),
     /// Start (Some) or stop (None) the live preview.
     Preview(Option<Stream>),
     Exit,
@@ -82,6 +95,8 @@ enum Kind {
     Channel { id: i64 },
     Reminder { id: i64, start: i64 },
     Catchup { id: i64, start: i64, end: i64 },
+    /// TiviOne is not installed: opens its store page.
+    Promo,
 }
 
 struct Tile {
@@ -185,7 +200,29 @@ enum MenuItem {
     Move,
     Hide,
     Show,
+    /// Hide the TiviOne tile (it stays in Settings).
+    HidePromo,
     Cancel,
+}
+
+/// TiviOne's store page: banner, what it does, screenshots, install or update.
+struct Store {
+    /// 0: buttons, 1: screenshots.
+    row: usize,
+    button: usize,
+    shot: usize,
+    /// The focused screenshot fills the screen.
+    full: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum StoreButton {
+    Install,
+    Update,
+    Retry,
+    Open,
+    Hide,
+    Close,
 }
 
 struct Menu {
@@ -204,6 +241,8 @@ enum Mode {
     Picker(Picker),
     /// The Settings panel (opened from the gear in the header).
     Settings,
+    /// TiviOne's store page.
+    Store(Store),
 }
 
 const PICKER_ROWS: usize = 10;
@@ -270,6 +309,10 @@ enum SettingId {
     Preview,
     Language,
     RefreshImages,
+    /// TiviOne's store page (install, update or about).
+    TiviOneStore,
+    /// The TiviOne tile on Home while TiviOne is missing.
+    TiviOnePromo,
     Info,
 }
 
@@ -294,6 +337,8 @@ enum Target {
     Gear,
     SettingsSection(usize),
     SettingsRow(usize),
+    StoreButton(usize),
+    StoreShot(usize),
 }
 
 struct Hero {
@@ -354,6 +399,14 @@ pub struct Home {
     header: bool,
     /// A setup panel or the picker was opened from Settings: Back returns there.
     from_settings: bool,
+    /// TiviOne on this TV, the newest release on its website, and a running install.
+    tivione: Option<Installed>,
+    release: Option<Release>,
+    install: InstallState,
+    /// Store-page pictures, created on first use; which cells hold one.
+    pictures: Option<Texture>,
+    picture_loaded: [bool; crate::installer::MAX_PICTURES],
+    pictures_requested: bool,
     pub loaded: bool,
 }
 
@@ -413,6 +466,12 @@ impl Home {
             ip: None,
             header: false,
             from_settings: false,
+            tivione: None,
+            release: None,
+            install: InstallState::Idle,
+            pictures: None,
+            picture_loaded: [false; crate::installer::MAX_PICTURES],
+            pictures_requested: false,
             loaded: false,
         }
     }
@@ -468,6 +527,18 @@ impl Home {
                 p.category = i;
                 changed
             }
+            (Target::StoreButton(i), Mode::Store(store)) if !store.full => {
+                let changed = store.row != 0 || store.button != i;
+                store.row = 0;
+                store.button = i;
+                changed
+            }
+            (Target::StoreShot(i), Mode::Store(store)) if !store.full => {
+                let changed = store.row != 1 || store.shot != i;
+                store.row = 1;
+                store.shot = i;
+                changed
+            }
             (Target::PickerRow(i), Mode::Picker(p)) => {
                 let changed = p.column != 1 || p.row != i;
                 p.column = 1;
@@ -492,6 +563,7 @@ impl Home {
         match rail {
             FAVORITES => s.favorites,
             CONTINUE => s.continue_watching,
+            TV_RECENT if self.tv.is_none() => s.live_tv,
             TV_RECENT => s.tv_recent,
             TV_FAVORITES => s.tv_favorites,
             TV_CATCHUP => s.catch_up,
@@ -658,7 +730,14 @@ impl Home {
         if self.apps.iter().any(|a| a.id == TIVIONE_APP) {
             let on = status.tivione == Some(true);
             let mut tile = Tile::new("setting:TiviOne".into(), s.tivione.into(), Kind::Setting { service: Service::TiviOne, connected: on }, 2);
-            tile.detail = if on { s.shown_on_home } else { s.off }.to_string();
+            tile.detail = if on {
+                s.shown_on_home
+            } else if self.tivione_too_old() {
+                s.tivione_needs_update
+            } else {
+                s.off
+            }
+            .to_string();
             tile.bg = Rgba::hex(0x14161C);
             tile.accent = Rgba::hex(0x2BB8A6);
             tiles.push(tile);
@@ -688,7 +767,7 @@ impl Home {
 
     /// Offers the TiviOne integration once, when TiviOne is installed and nothing was decided.
     fn maybe_offer(&mut self) {
-        let installed = self.apps.iter().any(|a| a.id == TIVIONE_APP);
+        let installed = self.apps.iter().any(|a| a.id == TIVIONE_APP) && !self.tivione_too_old();
         if !self.offered && installed && self.status.tivione.is_none() && matches!(self.mode, Mode::Browse) && self.loaded {
             self.offered = true;
             self.mode = Mode::Offer { yes: true };
@@ -701,6 +780,7 @@ impl Home {
             for rail in [TV_RECENT, TV_FAVORITES, TV_CATCHUP, TV_COMING] {
                 self.rails[rail].replace(Vec::new());
             }
+            self.update_promo();
             self.fix_active();
             self.refocus(false);
             return;
@@ -759,6 +839,194 @@ impl Home {
         self.rails[TV_COMING].replace(coming);
         self.fix_active();
         self.refocus(false);
+    }
+
+    // ---- TiviOne: store page, install and update -----------------------------------
+
+    pub fn set_tivione(&mut self, installed: Option<Installed>) {
+        if self.tivione == installed {
+            return;
+        }
+        self.tivione = installed;
+        self.update_promo();
+        self.set_status(self.status.clone());
+    }
+
+    pub fn set_release(&mut self, release: Option<Release>) {
+        if self.release == release {
+            return;
+        }
+        if self.release.as_ref().map(|r| &r.pictures) != release.as_ref().map(|r| &r.pictures) {
+            self.pictures_requested = false;
+        }
+        self.release = release;
+        self.update_promo();
+        self.refocus(false);
+    }
+
+    pub fn set_install(&mut self, state: InstallState) {
+        if state == InstallState::Done {
+            self.install = InstallState::Idle;
+            self.notice = Some((self.strings.tivione_installed.to_string(), Instant::now()));
+            if matches!(self.mode, Mode::Store(_)) {
+                self.mode = self.after_overlay();
+            }
+            // The new app list brings the TiviOne tile and the offer to connect it.
+            self.offered = false;
+            self.pending.push(Action::Refresh);
+        } else {
+            self.install = state;
+        }
+        self.refocus(false);
+    }
+
+    pub fn add_picture(&mut self, picture: Picture, renderer: &Renderer) {
+        if picture.index >= self.picture_loaded.len() {
+            return;
+        }
+        let texture = *self.pictures.get_or_insert_with(|| renderer.create_texture(PICTURE_ATLAS.0, PICTURE_ATLAS.1, gl::RGBA));
+        let (x, y) = picture_cell(picture.index);
+        renderer.upload(texture, x, y, picture.w as i32, picture.h as i32, gl::RGBA, &picture.rgba);
+        self.picture_loaded[picture.index] = true;
+    }
+
+    /// Texture and UV rectangle of a loaded store picture (0: banner, then screenshots).
+    fn picture(&self, index: usize) -> Option<(Texture, [f32; 4])> {
+        let texture = self.pictures?;
+        if !self.picture_loaded.get(index).copied().unwrap_or(false) {
+            return None;
+        }
+        let (x, y) = picture_cell(index);
+        let (w, h) = (PICTURE_ATLAS.0 as f32, PICTURE_ATLAS.1 as f32);
+        Some((texture, [x as f32 / w, y as f32 / h, (x + PICTURE_CELL.0) as f32 / w, (y + PICTURE_CELL.1) as f32 / h]))
+    }
+
+    /// Installed, but a version from before the launcher feed (it can only be opened).
+    fn tivione_too_old(&self) -> bool {
+        self.tivione.as_ref().is_some_and(|i| version_newer(TIVIONE_FEED_VERSION, &i.version))
+    }
+
+    /// A newer release for a TiviOne that Vision installed (store installs update via LG).
+    fn update_available(&self) -> bool {
+        matches!((&self.tivione, &self.release), (Some(i), Some(r)) if i.direct && version_newer(&r.version, &i.version))
+    }
+
+    /// The TiviOne tile on Home: while TiviOne is missing, a release is available and the
+    /// user has not hidden it.
+    fn promo_visible(&self) -> bool {
+        self.tv.is_none()
+            && self.release.is_some()
+            && self.prefs.ui.tivione_promo
+            && self.tivione.is_none()
+            && !self.apps.iter().any(|a| a.id == TIVIONE_APP)
+    }
+
+    fn update_promo(&mut self) {
+        if self.tv.is_some() {
+            return;
+        }
+        let shown = self.rails[TV_RECENT].tiles.first().is_some_and(|t| t.kind == Kind::Promo);
+        let visible = self.promo_visible();
+        if shown == visible {
+            return;
+        }
+        let tiles = if visible {
+            let mut tile = Tile::new("promo:tivione".into(), "TiviOne".into(), Kind::Promo, 0);
+            tile.detail = self.strings.promo_detail.to_string();
+            tile.bg = Rgba::hex(0x0A3236);
+            tile.accent = TIVIONE_TEAL;
+            vec![tile]
+        } else {
+            Vec::new()
+        };
+        self.rails[TV_RECENT].replace(tiles);
+        self.fix_active();
+        self.refocus(false);
+    }
+
+    fn open_store(&mut self) -> Option<Action> {
+        self.mode = Mode::Store(Store { row: 0, button: 0, shot: 0, full: false });
+        let release = self.release.as_ref().filter(|_| !self.pictures_requested)?.clone();
+        self.pictures_requested = true;
+        Some(Action::Pictures(release))
+    }
+
+    fn store_buttons(&self) -> Vec<StoreButton> {
+        let mut buttons = Vec::new();
+        let busy = matches!(self.install, InstallState::Downloading(_) | InstallState::Installing);
+        let failed = matches!(self.install, InstallState::Failed(_));
+        if !busy {
+            match (&self.tivione, &self.release) {
+                (None, Some(_)) => buttons.push(if failed { StoreButton::Retry } else { StoreButton::Install }),
+                (Some(_), _) if self.update_available() => buttons.push(if failed { StoreButton::Retry } else { StoreButton::Update }),
+                (Some(_), _) => buttons.push(StoreButton::Open),
+                (None, None) => {}
+            }
+        }
+        buttons.push(if self.tivione.is_none() && self.prefs.ui.tivione_promo { StoreButton::Hide } else { StoreButton::Close });
+        buttons
+    }
+
+    fn store_key(&mut self, key: Key) -> Option<Action> {
+        let buttons = self.store_buttons();
+        let shots = self.release.as_ref().map_or(0, |r| r.pictures.len().saturating_sub(1));
+        let Mode::Store(store) = &mut self.mode else { return None };
+        store.button = store.button.min(buttons.len() - 1);
+        if store.full {
+            match key {
+                Key::Left if store.shot > 0 => store.shot -= 1,
+                Key::Right if store.shot + 1 < shots => store.shot += 1,
+                Key::Ok | Key::Back => store.full = false,
+                _ => {}
+            }
+            return None;
+        }
+        match (key, store.row) {
+            (Key::Back, _) => self.mode = self.after_overlay(),
+            (Key::Up, _) => store.row = 0,
+            (Key::Down, _) if shots > 0 => store.row = 1,
+            (Key::Left, 0) if store.button > 0 => store.button -= 1,
+            (Key::Right, 0) if store.button + 1 < buttons.len() => store.button += 1,
+            (Key::Left, 1) if store.shot > 0 => store.shot -= 1,
+            (Key::Right, 1) if store.shot + 1 < shots => store.shot += 1,
+            (Key::Ok, 1) => store.full = true,
+            (Key::Ok, _) => {
+                let button = buttons[store.button];
+                return self.store_press(button);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn store_press(&mut self, button: StoreButton) -> Option<Action> {
+        match button {
+            StoreButton::Install | StoreButton::Update | StoreButton::Retry => {
+                let release = self.release.clone()?;
+                self.install = InstallState::Downloading(0.0);
+                Some(Action::Install(release))
+            }
+            StoreButton::Open => {
+                self.mode = Mode::Browse;
+                self.from_settings = false;
+                Some(Action::Launch { app_id: TIVIONE_APP.into(), params: None })
+            }
+            StoreButton::Hide => {
+                self.mode = self.after_overlay();
+                self.hide_promo()
+            }
+            StoreButton::Close => {
+                self.mode = self.after_overlay();
+                None
+            }
+        }
+    }
+
+    fn hide_promo(&mut self) -> Option<Action> {
+        self.prefs.ui.tivione_promo = false;
+        self.update_promo();
+        self.notice = Some((self.strings.promo_hidden.to_string(), Instant::now()));
+        Some(Action::SavePrefs(self.prefs.clone()))
     }
 
     /// Called every minute: the guide moves on, so the hero text may change.
@@ -958,6 +1226,7 @@ impl Home {
             Mode::Offer { .. } => self.offer_key(key),
             Mode::Picker(_) => self.picker_key(key),
             Mode::Settings => self.settings_key(key),
+            Mode::Store(_) => self.store_key(key),
             Mode::Browse if self.header => self.header_key(key),
             Mode::Browse if matches!(key, Key::Digit(_)) || (self.digits.is_some() && key == Key::Ok) => self.digit_key(key),
             Mode::Browse => self.browse_key(key, home_mode),
@@ -994,7 +1263,7 @@ impl Home {
         let ui = &self.prefs.ui;
         let onoff = |v: bool| if v { s.on } else { s.off }.to_string();
         let item = |id, label: &str, value: String, on: Option<bool>| SettingItem { id, label: label.to_string(), value, on, enabled: true };
-        let connections = self
+        let mut connections: Vec<SettingItem> = self
             .settings
             .iter()
             .filter_map(|tile| match tile.kind {
@@ -1002,6 +1271,17 @@ impl Home {
                 _ => None,
             })
             .collect();
+        // TiviOne always has an entry: get it, update it, or read about it.
+        let (label, value) = match (&self.tivione, &self.release) {
+            (None, Some(r)) => (s.tivione_get, r.version.clone()),
+            (None, None) => (s.tivione_get, s.store_unavailable.to_string()),
+            (Some(_), Some(r)) if self.update_available() => (s.tivione_update, r.version.clone()),
+            (Some(i), _) => (s.tivione_about, i.version.clone()),
+        };
+        connections.push(item(SettingId::TiviOneStore, label, value, None));
+        if self.tivione.is_none() {
+            connections.push(item(SettingId::TiviOnePromo, s.tivione_on_home, onoff(ui.tivione_promo), Some(ui.tivione_promo)));
+        }
         let location = match (&self.status.location, &self.status.ha) {
             (Some(name), _) => name.clone(),
             (None, Some(_)) => s.from_home_assistant.to_string(),
@@ -1120,6 +1400,12 @@ impl Home {
                 return Some(Action::RefreshImages);
             }
             SettingId::Info => return None,
+            SettingId::TiviOneStore => {
+                let action = self.open_store();
+                self.from_settings = true;
+                return action;
+            }
+            SettingId::TiviOnePromo => ui.tivione_promo = !ui.tivione_promo,
             SettingId::WeatherShow => ui.weather = !ui.weather,
             SettingId::Units => ui.fahrenheit = !ui.fahrenheit,
             SettingId::Clock24 => ui.clock24 = !ui.clock24,
@@ -1148,6 +1434,7 @@ impl Home {
                 self.fix_active();
             }
         }
+        self.update_promo();
         Some(Action::SavePrefs(self.prefs.clone()))
     }
 
@@ -1180,6 +1467,9 @@ impl Home {
             Key::Ok => return self.activate(),
             Key::LongOk if active == FAVORITES && count > 0 => {
                 self.mode = Mode::Menu(Menu { items: vec![MenuItem::Move, MenuItem::Hide, MenuItem::Cancel], focus: 0 });
+            }
+            Key::LongOk if self.focused().is_some_and(|t| t.kind == Kind::Promo) => {
+                self.mode = Mode::Menu(Menu { items: vec![MenuItem::HidePromo, MenuItem::Cancel], focus: 0 });
             }
             Key::LongOk if active == HIDDEN && count > 0 => {
                 self.mode = Mode::Menu(Menu { items: vec![MenuItem::Show, MenuItem::Cancel], focus: 0 });
@@ -1302,11 +1592,16 @@ impl Home {
                 Some(Action::Service(ServiceRequest::HaAction(tile.id.clone())))
             }
             Kind::Setting { service, connected } => self.open_setting(service, connected),
+            Kind::Promo => self.open_store(),
         }
     }
 
     fn open_setting(&mut self, service: Service, connected: bool) -> Option<Action> {
         match (service, connected) {
+            (Service::TiviOne, false) if self.tivione_too_old() => {
+                self.notice = Some((self.strings.tivione_needs_update.to_string(), Instant::now()));
+                None
+            }
             (Service::TiviOne, connected) => Some(Action::Service(ServiceRequest::TiviOne(!connected))),
             (Service::HomeTiles, _) => {
                 self.mode = Mode::Picker(Picker {
@@ -1412,6 +1707,7 @@ impl Home {
                 }
                 self.save()
             }
+            MenuItem::HidePromo => self.hide_promo(),
             MenuItem::Cancel => None,
         }
     }
@@ -1462,7 +1758,7 @@ impl Home {
 
     fn refocus(&mut self, instant: bool) {
         let moving = matches!(self.mode, Mode::Move { .. });
-        let overlay = matches!(self.mode, Mode::Menu(_) | Mode::Setup { .. } | Mode::Offer { .. } | Mode::Picker(_) | Mode::Settings);
+        let overlay = matches!(self.mode, Mode::Menu(_) | Mode::Setup { .. } | Mode::Offer { .. } | Mode::Picker(_) | Mode::Settings | Mode::Store(_));
         let active = self.active;
         for (r, rail) in self.rails.iter_mut().enumerate() {
             for (i, tile) in rail.tiles.iter_mut().enumerate() {
@@ -1518,6 +1814,14 @@ impl Home {
         if let (Kind::Channel { id } | Kind::Reminder { id, .. } | Kind::Catchup { id, .. }, Some(tv)) = (tile.kind, &self.tv) {
             return self.channel_hero(tile, id, tv);
         }
+        if tile.kind == Kind::Promo {
+            return Hero {
+                eyebrow: format!("TiviOne · {}", s.live_tv).to_uppercase(),
+                title: s.promo_title.to_string(),
+                sub: s.promo_sub.to_string(),
+                hint: Some(s.press_ok_for_details),
+            };
+        }
         let eyebrow = if moving { s.moving.to_uppercase() } else { self.rail_title(self.active).to_uppercase() };
         let (sub, hint) = match (tile.kind, self.active) {
             _ if moving => (s.moving_hint.to_string(), None),
@@ -1534,6 +1838,7 @@ impl Home {
                 (tile.detail.clone(), Some(if connected { s.press_ok_to_manage } else { s.press_ok_to_connect }))
             }
             (Kind::Channel { .. } | Kind::Reminder { .. } | Kind::Catchup { .. }, _) => (tile.detail.clone(), Some(s.press_ok_to_watch)),
+            (Kind::Promo, _) => (tile.detail.clone(), Some(s.press_ok_for_details)),
         };
         Hero { eyebrow, title: tile.title.clone(), sub, hint }
     }
@@ -1675,6 +1980,7 @@ impl Home {
         self.draw_setup(r, text);
         self.draw_offer(r, text);
         self.draw_settings(r, text);
+        self.draw_store(r, text);
         self.draw_picker(r, text);
         self.draw_digits(r, text);
         self.draw_notice(r, text);
@@ -1820,6 +2126,7 @@ impl Home {
                 MenuItem::Move => self.strings.menu_move,
                 MenuItem::Hide => self.strings.menu_hide,
                 MenuItem::Show => self.strings.menu_show,
+                MenuItem::HidePromo => self.strings.menu_hide,
                 MenuItem::Cancel => self.strings.menu_cancel,
             };
             let color = if i == menu.focus { BG } else { TEXT };
@@ -1959,6 +2266,156 @@ impl Home {
             }
             text.draw(r, label, bx + 36.0, by + 42.0, MENU_ITEM, if focused { BG } else { TEXT }.alpha(open));
             bx += w + 20.0;
+        }
+    }
+
+    /// TiviOne's store page: banner and facts, what it does, screenshots.
+    fn draw_store(&self, r: &mut Renderer, text: &mut Text) {
+        let open = self.overlay.value.clamp(0.0, 1.0);
+        let Mode::Store(store) = &self.mode else { return };
+        if open <= 0.01 {
+            return;
+        }
+        let s = self.strings;
+        let a = |v: f32| TEXT.alpha(v * open);
+        let shots = self.release.as_ref().map_or(0, |r| r.pictures.len().saturating_sub(1));
+        r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(open));
+        if store.full {
+            match self.picture(store.shot + 1) {
+                Some((texture, uv)) => r.image(texture, Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), uv, 0.0, Rgba::hex(0xFFFFFF).alpha(open)),
+                None => {
+                    text.draw_top(r, s.store_screenshots, SAFE_X, SAFE_TOP, RAIL_TITLE, a(0.6));
+                }
+            }
+            let counter = format!("{} / {shots}", store.shot + 1);
+            let w = text.measure(r, &counter, HINT) + 40.0;
+            let pill = Rect::new(LOGICAL_W - SAFE_X - w, LOGICAL_H - SAFE_TOP - 52.0, w, 52.0);
+            r.rect(pill, 26.0, BG.alpha(0.75 * open));
+            text.draw(r, &counter, pill.x + 20.0, pill.y + 35.0, HINT, a(0.9));
+            return;
+        }
+        r.radial(1500.0, 160.0, 900.0, 620.0, TIVIONE_TEAL.alpha(0.2 * open));
+        let dy = 24.0 * (1.0 - open);
+
+        let banner = Rect::new(SAFE_X, 96.0 + dy, 746.0, 420.0);
+        r.shadow(banner.offset(0.0, 24.0), TILE_RADIUS, 60.0, Rgba::hex(0).alpha(0.5 * open));
+        match self.picture(0) {
+            Some((texture, uv)) => r.image(texture, banner, uv, TILE_RADIUS, Rgba::hex(0xFFFFFF).alpha(open)),
+            None => {
+                r.rect(banner, TILE_RADIUS, Rgba::hex(0x062A2E).alpha(open));
+                let w = text.measure(r, "TiviOne", SETUP_TITLE);
+                text.draw_top(r, "TiviOne", banner.x + (banner.w - w) * 0.5, banner.y + banner.h * 0.5 - 34.0, SETUP_TITLE, a(1.0));
+            }
+        }
+
+        // Name, pitch, facts and the buttons, right of the banner.
+        let x = banner.x + banner.w + 64.0;
+        let width = LOGICAL_W - SAFE_X - x;
+        let mut y = banner.y + 6.0;
+        text.draw_top(r, &format!("TiviOne · {}", s.live_tv).to_uppercase(), x, y, EYEBROW, TIVIONE_TEAL.alpha(open));
+        y += 44.0;
+        let title = crate::theme::hero(HERO_SIZES[2]);
+        text.draw_top(r, "TiviOne", x - 4.0, y, title, a(1.0));
+        y += title.size * 1.08 + 16.0;
+        for line in wrap(text, r, s.store_tagline, HERO_SUB, width).iter().take(3) {
+            text.draw_top(r, line, x, y, HERO_SUB, a(0.78));
+            y += 40.0;
+        }
+        y += 8.0;
+        let mut facts = Vec::new();
+        if let Some(release) = &self.release {
+            facts.push(format!("{} {}", s.version, release.version));
+            facts.push(format!("{:.1} MB", release.size as f32 / 1_048_576.0));
+        }
+        if let Some(installed) = &self.tivione {
+            facts.push(format!("{} {}", s.store_installed, installed.version));
+        }
+        facts.push("tivione.zf-labs.de".into());
+        text.draw_top(r, &facts.join(" · "), x, y, SETUP_SMALL, a(0.55));
+        y += 52.0;
+
+        let mut bx = x;
+        let progress = match self.install {
+            InstallState::Downloading(p) => Some((p, format!("{} {:.0} %", s.store_downloading, p * 100.0))),
+            InstallState::Installing => Some((1.0, s.store_installing.to_string())),
+            _ => None,
+        };
+        if let Some((p, label)) = progress {
+            let track = Rect::new(bx, y, 440.0, 64.0);
+            r.rect(track, 32.0, TEXT.alpha(0.1 * open));
+            r.rect(Rect::new(track.x, track.y, (track.w * p).max(64.0), track.h), 32.0, TIVIONE_TEAL.alpha(0.85 * open));
+            text.draw(r, &label, track.x + 32.0, track.y + 42.0, MENU_ITEM, a(1.0));
+            bx += track.w + 20.0;
+        }
+        let buttons = self.store_buttons();
+        let focus = store.button.min(buttons.len().saturating_sub(1));
+        for (i, button) in buttons.iter().enumerate() {
+            let label = match button {
+                StoreButton::Install => s.store_install,
+                StoreButton::Update => s.store_update,
+                StoreButton::Retry => s.store_retry,
+                StoreButton::Open => s.store_open,
+                StoreButton::Hide => s.store_hide,
+                StoreButton::Close => s.store_close,
+            };
+            let w = text.measure(r, label, MENU_ITEM) + 72.0;
+            let rect = Rect::new(bx, y, w, 64.0);
+            self.hits.borrow_mut().push((rect, Target::StoreButton(i)));
+            let focused = store.row == 0 && i == focus;
+            if focused {
+                r.rect(rect, 32.0, TEXT.alpha(open));
+            } else {
+                r.stroke(rect, 32.0, 1.5, TEXT.alpha(0.35 * open));
+            }
+            text.draw(r, label, bx + 36.0, y + 42.0, MENU_ITEM, if focused { BG } else { TEXT }.alpha(open));
+            bx += w + 20.0;
+        }
+        let status = match (&self.install, &self.tivione, &self.release) {
+            (InstallState::Failed(failure), ..) => Some((
+                match failure {
+                    InstallFailure::Network => s.fail_network,
+                    InstallFailure::Damaged => s.fail_damaged,
+                    InstallFailure::NeedsRoot => s.fail_root,
+                    InstallFailure::Refused => s.fail_refused,
+                },
+                Rgba::hex(0xFF8A80),
+            )),
+            (_, None, None) => Some((s.store_unavailable, TEXT.alpha(0.6))),
+            (_, Some(i), Some(release)) if !i.direct && version_newer(&release.version, &i.version) => Some((s.store_lg_updates, TEXT.alpha(0.6))),
+            _ => None,
+        };
+        if let Some((message, color)) = status {
+            let line = clip(text, r, message, SETUP_SMALL, width);
+            text.draw_top(r, &line, x, y + 88.0, SETUP_SMALL, color.fade(open));
+        }
+
+        // What it does: two columns under the banner.
+        let top = banner.y + banner.h + 52.0;
+        let column = (LOGICAL_W - 2.0 * SAFE_X - 64.0) * 0.5;
+        for (i, feature) in s.store_features.iter().enumerate() {
+            let (fx, fy) = (SAFE_X + (i % 2) as f32 * (column + 64.0), top + (i / 2) as f32 * 108.0);
+            r.rect(Rect::new(fx, fy + 12.0, 12.0, 12.0), 6.0, TIVIONE_TEAL.alpha(open));
+            for (l, line) in wrap(text, r, feature, HERO_SUB, column - 36.0).iter().take(2).enumerate() {
+                text.draw_top(r, line, fx + 32.0, fy + l as f32 * 40.0, HERO_SUB, a(0.85));
+            }
+        }
+
+        // Screenshots: OK shows one full screen.
+        let title_y = top + 2.0 * 108.0 + 6.0;
+        text.draw_top(r, s.store_screenshots, SAFE_X, title_y, RAIL_TITLE, a(if store.row == 1 { 0.7 } else { 0.5 }));
+        let (cw, ch, gap) = (320.0, 180.0, 28.0);
+        for i in 0..shots {
+            let base = Rect::new(SAFE_X + i as f32 * (cw + gap), title_y + 44.0, cw, ch);
+            let focused = store.row == 1 && i == store.shot;
+            let card = if focused { base.scale_about(1.06, 0.5, 0.5) } else { base };
+            self.hits.borrow_mut().push((card, Target::StoreShot(i)));
+            match self.picture(i + 1) {
+                Some((texture, uv)) => r.image(texture, card, uv, 14.0, Rgba::hex(0xFFFFFF).alpha((if focused { 1.0 } else { 0.78 }) * open)),
+                None => r.rect(card, 14.0, Rgba::hex(0x14161C).alpha(open)),
+            }
+            if focused {
+                r.stroke(card.inflate(RING_OFFSET + RING_WIDTH * 0.5), 14.0 + RING_OFFSET, RING_WIDTH, a(1.0));
+            }
         }
     }
 
@@ -2158,6 +2615,11 @@ struct TileView {
     fill: Option<Rgba>,
 }
 
+/// Top-left texel of a store picture's cell (two per row).
+fn picture_cell(index: usize) -> (i32, i32) {
+    ((index % 2) as i32 * PICTURE_CELL.0, (index / 2) as i32 * PICTURE_CELL.1)
+}
+
 fn draw_panel(r: &mut Renderer, panel: Rect, open: f32) {
     r.shadow(panel.offset(0.0, 24.0), 22.0, 60.0, Rgba::hex(0).alpha(0.5 * open));
     r.rect(panel, 22.0, Rgba::hex(0x14161C).alpha(0.96 * open));
@@ -2257,6 +2719,11 @@ fn draw_tile_shapes(r: &mut Renderer, tile: &Tile, v: &TileView) {
         Kind::Input { connected } | Kind::Setting { connected, .. } => {
             let dot = if connected { CONNECTED } else { TEXT.alpha(0.3) };
             r.rect(Rect::new(rect.x + 26.0, rect.y + rect.h * 0.5 - 6.0, 12.0, 12.0), 6.0, dot.fade(alpha));
+        }
+        Kind::Promo => {
+            // TiviOne's teal, brighter towards the bottom, with its wordmark colours as a bar.
+            r.vgradient(rect, tile.bg.fade(alpha), Rgba::hex(0x0F5A5A).fade(alpha));
+            r.rect(Rect::new(rect.x + 24.0, rect.y + rect.h - 30.0, 56.0, 6.0), 3.0, TIVIONE_TEAL.fade(alpha));
         }
         Kind::Entity { on } => {
             let lamp = match on {
@@ -2367,6 +2834,12 @@ fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: &TileView, 
             let line = clip(text, r, &tile.title, INPUT_LABEL, rect.w - 48.0);
             text.draw(r, &line, x, rect.y + rect.h - 52.0, INPUT_LABEL, TEXT.alpha(alpha));
             text.draw(r, &tile.detail, x, rect.y + rect.h - 22.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
+        }
+        Kind::Promo => {
+            let x = rect.x + 24.0;
+            text.draw_top(r, &tile.title, x, rect.y + 22.0, MONOGRAM, TEXT.alpha(alpha));
+            let detail = clip(text, r, &tile.detail, INPUT_SUB, rect.w - 48.0);
+            text.draw(r, &detail, x, rect.y + rect.h - 44.0, INPUT_SUB, TEXT.alpha(0.75 * alpha));
         }
         Kind::Setting { .. } => {
             let x = rect.x + 52.0;
