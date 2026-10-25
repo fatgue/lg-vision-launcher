@@ -21,8 +21,51 @@ pub struct Strings {
     pub notice_app_list: &'static str,
     pub notice_launch_failed: &'static str,
     pub notice_preview_launch: &'static str,
+    pub continue_watching: &'static str,
+    pub home: &'static str,
+    pub settings: &'static str,
+    pub min_left: &'static str,
+    pub opens_in_plex: &'static str,
+    pub scene: &'static str,
+    pub script: &'static str,
+    pub on: &'static str,
+    pub off: &'static str,
+    pub press_ok_to_activate: &'static str,
+    pub press_ok_to_toggle: &'static str,
+    pub home_assistant: &'static str,
+    pub plex: &'static str,
+    pub not_connected: &'static str,
+    pub press_ok_to_connect: &'static str,
+    pub press_ok_to_manage: &'static str,
+    pub ha_setup_title: &'static str,
+    pub ha_setup_steps: [&'static str; 3],
+    pub plex_setup_title: &'static str,
+    pub plex_setup_step: &'static str,
+    pub waiting_for_plex: &'static str,
+    pub connected_to: &'static str,
+    pub disconnect: &'static str,
+    pub back_to_close: &'static str,
+    pub weather: [&'static str; 10],
     pub days: [&'static str; 7],
     pub months: [&'static str; 12],
+}
+
+impl Strings {
+    /// Short description for a WMO weather code.
+    pub fn weather(&self, code: u32) -> &'static str {
+        self.weather[match code {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3 => 3,
+            45 | 48 => 4,
+            51..=57 => 5,
+            61..=67 => 6,
+            71..=77 | 85 | 86 => 7,
+            80..=82 => 8,
+            _ => 9,
+        }]
+    }
 }
 
 pub static EN: Strings = Strings {
@@ -45,6 +88,35 @@ pub static EN: Strings = Strings {
     notice_app_list: "App list unavailable",
     notice_launch_failed: "Could not launch the app",
     notice_preview_launch: "Preview: would launch",
+    continue_watching: "Continue watching",
+    home: "Home",
+    settings: "Settings",
+    min_left: "min left",
+    opens_in_plex: "Press OK to open Plex",
+    scene: "Scene",
+    script: "Script",
+    on: "On",
+    off: "Off",
+    press_ok_to_activate: "Press OK to activate",
+    press_ok_to_toggle: "Press OK to switch",
+    home_assistant: "Home Assistant",
+    plex: "Plex",
+    not_connected: "Not connected",
+    press_ok_to_connect: "Press OK to connect",
+    press_ok_to_manage: "Press OK to manage",
+    ha_setup_title: "Connect Home Assistant",
+    ha_setup_steps: [
+        "Scan the code with your phone.",
+        "Enter your Home Assistant address and a long-lived access token.",
+        "Vision connects as soon as you save.",
+    ],
+    plex_setup_title: "Connect Plex",
+    plex_setup_step: "On your phone or computer, open plex.tv/link and enter this code:",
+    waiting_for_plex: "Waiting for Plex…",
+    connected_to: "Connected to",
+    disconnect: "Disconnect",
+    back_to_close: "Back to close",
+    weather: ["Clear", "Mainly clear", "Partly cloudy", "Overcast", "Fog", "Drizzle", "Rain", "Snow", "Showers", "Thunderstorm"],
     days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
     months: [
         "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December",
@@ -74,11 +146,34 @@ pub fn charset(strings: &Strings) -> String {
         strings.menu_cancel,
         strings.moving,
         strings.moving_hint,
+        strings.continue_watching,
+        strings.home,
+        strings.settings,
+        strings.min_left,
+        strings.opens_in_plex,
+        strings.scene,
+        strings.script,
+        strings.on,
+        strings.off,
+        strings.press_ok_to_activate,
+        strings.press_ok_to_toggle,
+        strings.home_assistant,
+        strings.plex,
+        strings.not_connected,
+        strings.press_ok_to_connect,
+        strings.press_ok_to_manage,
+        strings.ha_setup_title,
+        strings.plex_setup_title,
+        strings.plex_setup_step,
+        strings.waiting_for_plex,
+        strings.connected_to,
+        strings.disconnect,
+        strings.back_to_close,
     ] {
         all.push_str(text);
         all.push_str(&text.to_uppercase());
     }
-    for text in strings.days.iter().chain(strings.months.iter()) {
+    for text in strings.days.iter().chain(strings.months.iter()).chain(strings.weather.iter()).chain(strings.ha_setup_steps.iter()) {
         all.push_str(text);
     }
     all

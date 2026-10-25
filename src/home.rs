@@ -2,7 +2,7 @@
 use crate::anim::Spring;
 use crate::color::Rgba;
 use crate::gl;
-use crate::model::{App, Icon, Input, Notice};
+use crate::model::{App, Entity, Icon, Input, MediaItem, Notice, ServiceRequest, Status, Weather};
 use crate::render::{Rect, Renderer, Texture, LOGICAL_H, LOGICAL_W};
 use crate::storage::Prefs;
 use crate::strings::{self, Strings};
@@ -15,17 +15,23 @@ use std::time::{Duration, Instant};
 const ICON_CELL: i32 = 128;
 const ICON_ATLAS: i32 = 1024;
 const ART_ATLAS: i32 = 2048;
+const ART_CELL: (i32, i32) = (320, 180);
 const RAIL_TITLE_Y: f32 = 620.0;
 const RAIL_PITCH: f32 = 340.0;
 const AMBIENT_SPEED: f32 = 6.0;
 
 const FAVORITES: usize = 0;
-const INPUTS: usize = 1;
-const HIDDEN: usize = 2;
+const CONTINUE: usize = 1;
+const HOME: usize = 2;
+const INPUTS: usize = 3;
+const HIDDEN: usize = 4;
+const SETTINGS: usize = 5;
+const PLEX_APP: &str = "cdp-30";
 
 pub enum Action {
     Launch { app_id: String, params: Option<Value> },
     SavePrefs(Prefs),
+    Service(ServiceRequest),
     Exit,
 }
 
@@ -41,15 +47,26 @@ pub enum Key {
     Back,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Service {
+    HomeAssistant,
+    Plex,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     App,
     Input { connected: bool },
+    Media { progress: f32 },
+    Entity { on: Option<bool> },
+    Setting { service: Service, connected: bool },
 }
 
 struct Tile {
     id: String,
     title: String,
+    /// Media subtitle, entity state or setting status.
+    detail: String,
     launch_id: String,
     params: Option<Value>,
     kind: Kind,
@@ -61,18 +78,24 @@ struct Tile {
 }
 
 impl Tile {
-    fn app(app: App, index: usize) -> Self {
-        let mut tile = Self {
-            id: app.id.clone(),
-            title: app.title,
-            launch_id: app.id,
-            params: app.params,
-            kind: Kind::App,
+    fn new(id: String, title: String, kind: Kind, index: usize) -> Self {
+        Self {
+            launch_id: id.clone(),
+            id,
+            title,
+            detail: String::new(),
+            params: None,
+            kind,
             bg: TILE_NEUTRAL,
             accent: ACCENT_DEFAULT,
             focus: Spring::new(0.0, 18.0),
             slot: Spring::new(index as f32, 16.0),
-        };
+        }
+    }
+
+    fn app(app: App, index: usize) -> Self {
+        let mut tile = Self::new(app.id.clone(), app.title, Kind::App, index);
+        tile.params = app.params;
         if let Some(color) = app.bg_color.as_deref().and_then(Rgba::parse) {
             tile.tint(color);
         }
@@ -123,6 +146,16 @@ impl Rail {
     fn ids(&self) -> Vec<String> {
         self.tiles.iter().map(|t| t.id.clone()).collect()
     }
+
+    /// Replaces the tiles, keeping focus on the same id where possible.
+    fn replace(&mut self, tiles: Vec<Tile>) {
+        let focused = self.tiles.get(self.focus).map(|t| t.id.clone());
+        self.tiles = tiles;
+        self.focus = focused
+            .and_then(|id| self.tiles.iter().position(|t| t.id == id))
+            .unwrap_or(self.focus)
+            .min(self.tiles.len().saturating_sub(1));
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -142,6 +175,7 @@ enum Mode {
     Browse,
     Menu(Menu),
     Move { original: Vec<String> },
+    Setup { service: Service, closing_at: Option<Instant> },
 }
 
 struct Hero {
@@ -153,11 +187,13 @@ struct Hero {
 
 pub struct Home {
     strings: &'static Strings,
-    rails: [Rail; 3],
+    rails: [Rail; 6],
     active: usize,
     mode: Mode,
     prefs: Prefs,
     apps: Vec<App>,
+    status: Status,
+    weather: Option<Weather>,
     vscroll: Spring,
     overlay: Spring,
     lift: Spring,
@@ -166,14 +202,16 @@ pub struct Home {
     previous_hero: Option<Hero>,
     hero_t: Spring,
     icons: HashMap<String, [f32; 5]>,
-    /// Icons whose opaque border colour now fills their tile (drawn larger, seamless).
+    /// Icons whose opaque border colour fills their tile (drawn larger, seamless).
     blended: HashMap<String, Rgba>,
-    arts: HashMap<String, [f32; 4]>,
+    arts: HashMap<String, (usize, [f32; 4])>,
+    free_art: Vec<usize>,
     colors: HashMap<String, Rgba>,
     icon_atlas: Texture,
     icon_next: i32,
     art_atlas: Texture,
-    art_next: i32,
+    art_next: usize,
+    qr: Option<(String, qrcodegen::QrCode)>,
     notice: Option<(String, Instant)>,
     pub loaded: bool,
 }
@@ -182,11 +220,20 @@ impl Home {
     pub fn new(renderer: &Renderer, prefs: Prefs) -> Self {
         Self {
             strings: strings::current(),
-            rails: [Rail::new(300.0, 170.0), Rail::new(300.0, 120.0), Rail::new(300.0, 170.0)],
+            rails: [
+                Rail::new(300.0, 170.0),
+                Rail::new(300.0, 170.0),
+                Rail::new(300.0, 150.0),
+                Rail::new(300.0, 120.0),
+                Rail::new(300.0, 170.0),
+                Rail::new(300.0, 120.0),
+            ],
             active: FAVORITES,
             mode: Mode::Browse,
             prefs,
             apps: Vec::new(),
+            status: Status::default(),
+            weather: None,
             vscroll: Spring::new(0.0, 14.0),
             overlay: Spring::new(0.0, 22.0),
             lift: Spring::new(0.0, 18.0),
@@ -197,23 +244,31 @@ impl Home {
             icons: HashMap::new(),
             blended: HashMap::new(),
             arts: HashMap::new(),
+            free_art: Vec::new(),
             colors: HashMap::new(),
             icon_atlas: renderer.create_texture(ICON_ATLAS, ICON_ATLAS, gl::RGBA),
             icon_next: 0,
             art_atlas: renderer.create_texture(ART_ATLAS, ART_ATLAS, gl::RGBA),
             art_next: 0,
+            qr: None,
             notice: None,
             loaded: false,
         }
     }
 
     fn rail_title(&self, rail: usize) -> &'static str {
+        let s = self.strings;
         match rail {
-            FAVORITES => self.strings.favorites,
-            INPUTS => self.strings.inputs,
-            _ => self.strings.hidden,
+            FAVORITES => s.favorites,
+            CONTINUE => s.continue_watching,
+            HOME => s.home,
+            INPUTS => s.inputs,
+            HIDDEN => s.hidden,
+            _ => s.settings,
         }
     }
+
+    // ---- Data in --------------------------------------------------------------------
 
     pub fn set_apps(&mut self, apps: Vec<App>) {
         self.apps = apps;
@@ -254,7 +309,9 @@ impl Home {
         let hidden = build(hidden, &self.colors);
         self.rails[FAVORITES].tiles = favorites;
         self.rails[HIDDEN].tiles = hidden;
-        self.mode = Mode::Browse;
+        if matches!(self.mode, Mode::Menu(_) | Mode::Move { .. }) {
+            self.mode = Mode::Browse;
+        }
         self.restore_focus(focused_id);
         self.loaded = true;
         self.refocus(true);
@@ -275,63 +332,169 @@ impl Home {
     }
 
     pub fn set_inputs(&mut self, inputs: Vec<Input>) {
-        self.rails[INPUTS].tiles = inputs
+        let tiles = inputs
             .into_iter()
             .enumerate()
-            .map(|(i, input)| Tile {
-                id: input.id,
-                title: input.label,
-                launch_id: input.app_id,
-                params: None,
-                kind: Kind::Input { connected: input.connected },
-                bg: Rgba::hex(0x14161C),
-                accent: ACCENT_INPUT,
-                focus: Spring::new(0.0, 18.0),
-                slot: Spring::new(i as f32, 16.0),
+            .map(|(i, input)| {
+                let mut tile = Tile::new(input.id, input.label, Kind::Input { connected: input.connected }, i);
+                tile.launch_id = input.app_id;
+                tile.bg = Rgba::hex(0x14161C);
+                tile.accent = ACCENT_INPUT;
+                tile
             })
             .collect();
-        let rail = &mut self.rails[INPUTS];
-        rail.focus = rail.focus.min(rail.tiles.len().saturating_sub(1));
+        self.rails[INPUTS].replace(tiles);
         self.refocus(true);
     }
 
-    fn tint_app(&mut self, app_id: &str, color: Rgba) {
-        self.colors.insert(app_id.to_string(), color);
-        for rail in [FAVORITES, HIDDEN] {
-            for tile in self.rails[rail].tiles.iter_mut().filter(|t| t.id == app_id) {
+    pub fn set_media(&mut self, items: Vec<MediaItem>) {
+        let s = self.strings;
+        let plex_app = self.apps.iter().find(|a| a.id == PLEX_APP || a.title == "Plex").map(|a| a.id.clone());
+        let tiles = items
+            .into_iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let mut tile = Tile::new(format!("plex:{}", item.id), item.title, Kind::Media { progress: item.progress }, i);
+                let left = format!("{} {}", item.remaining_min, s.min_left);
+                tile.detail = if item.subtitle.is_empty() { left } else { format!("{} · {left}", item.subtitle) };
+                tile.launch_id = plex_app.clone().unwrap_or_else(|| PLEX_APP.into());
+                if let Some(color) = self.colors.get(&tile.id) {
+                    tile.tint(*color);
+                }
+                tile
+            })
+            .collect();
+        self.rails[CONTINUE].replace(tiles);
+        self.fix_active();
+        self.refocus(false);
+    }
+
+    pub fn set_entities(&mut self, entities: Vec<Entity>) {
+        let s = self.strings;
+        let tiles = entities
+            .into_iter()
+            .enumerate()
+            .map(|(i, entity)| {
+                let mut tile = Tile::new(entity.id, entity.name, Kind::Entity { on: entity.on }, i);
+                tile.detail = match (entity.domain.as_str(), entity.on) {
+                    ("scene", _) => s.scene.to_string(),
+                    ("script", _) => s.script.to_string(),
+                    (_, Some(true)) => match entity.brightness {
+                        Some(b) => format!("{} · {b} %", s.on),
+                        None => s.on.to_string(),
+                    },
+                    _ => s.off.to_string(),
+                };
+                tile.bg = Rgba::hex(0x15171D);
+                tile.accent = if entity.on == Some(true) { Rgba::hex(0xF2C14E) } else { Rgba::hex(0x9AA3B2) };
+                tile
+            })
+            .collect();
+        self.rails[HOME].replace(tiles);
+        self.fix_active();
+        self.refocus(false);
+    }
+
+    pub fn set_status(&mut self, status: Status) {
+        let s = self.strings;
+        let setting = |service: Service, name: &str, account: &Option<String>, error: &Option<String>, i: usize| {
+            let connected = account.is_some();
+            let id = format!("setting:{service:?}");
+            let mut tile = Tile::new(id, name.to_string(), Kind::Setting { service, connected }, i);
+            tile.detail = match (account, error) {
+                (Some(_), Some(error)) => error.clone(),
+                (Some(_), None) => s.connected.to_string(),
+                (None, _) => s.not_connected.to_string(),
+            };
+            tile.bg = Rgba::hex(0x14161C);
+            tile.accent = Rgba::hex(0x9AA3B2);
+            tile
+        };
+        let tiles = vec![
+            setting(Service::HomeAssistant, s.home_assistant, &status.ha, &status.ha_error, 0),
+            setting(Service::Plex, s.plex, &status.plex, &status.plex_error, 1),
+        ];
+        // Close a setup panel shortly after its service connects.
+        if let Mode::Setup { service, closing_at } = &mut self.mode {
+            let now_connected = match service {
+                Service::HomeAssistant => status.ha.is_some() && self.status.ha.is_none(),
+                Service::Plex => status.plex.is_some() && self.status.plex.is_none(),
+            };
+            if now_connected {
+                *closing_at = Some(Instant::now() + Duration::from_millis(1600));
+            }
+        }
+        self.qr = status
+            .ha_setup
+            .as_ref()
+            .and_then(|url| qrcodegen::QrCode::encode_text(url, qrcodegen::QrCodeEcc::Medium).ok().map(|qr| (url.clone(), qr)));
+        self.status = status;
+        self.rails[SETTINGS].replace(tiles);
+        self.refocus(false);
+    }
+
+    pub fn set_weather(&mut self, weather: Option<Weather>) {
+        self.weather = weather;
+    }
+
+    fn fix_active(&mut self) {
+        if self.rails[self.active].tiles.is_empty() {
+            self.active = (0..self.rails.len()).find(|&r| self.has(r)).unwrap_or(FAVORITES);
+        }
+    }
+
+    fn tint_id(&mut self, id: &str, color: Rgba) {
+        self.colors.insert(id.to_string(), color);
+        for rail in self.rails.iter_mut() {
+            for tile in rail.tiles.iter_mut().filter(|t| t.id == id) {
                 tile.tint(color);
             }
         }
     }
 
-    /// Full-bleed tile artwork (320×180). Its colour wins over the icon's for ambient light.
+    /// Full-bleed tile artwork (320×180) for an app or a Plex item.
     pub fn add_art(&mut self, art: Icon, renderer: &Renderer) {
         if let Some(color) = art.color {
-            self.tint_app(&art.app_id, Rgba::from_u8(color));
+            self.tint_id(&art.app_id, Rgba::from_u8(color));
         }
         if self.arts.contains_key(&art.app_id) {
             return;
         }
-        let (cols, rows) = (ART_ATLAS / art.w as i32, ART_ATLAS / art.h as i32);
-        if self.art_next >= cols * rows {
-            return;
-        }
-        let (x, y) = ((self.art_next % cols) * art.w as i32, (self.art_next / cols) * art.h as i32);
-        self.art_next += 1;
+        let Some(slot) = self.alloc_art_slot() else { return };
+        let cols = (ART_ATLAS / ART_CELL.0) as usize;
+        let (x, y) = ((slot % cols) as i32 * ART_CELL.0, (slot / cols) as i32 * ART_CELL.1);
         renderer.upload(self.art_atlas, x, y, art.w as i32, art.h as i32, gl::RGBA, &art.pixels);
         let a = ART_ATLAS as f32;
         // Half-texel inset keeps linear filtering from bleeding in the neighbouring cell.
-        self.arts.insert(
-            art.app_id,
-            [(x as f32 + 0.5) / a, (y as f32 + 0.5) / a, (x as f32 + art.w as f32 - 0.5) / a, (y as f32 + art.h as f32 - 0.5) / a],
-        );
+        let uv = [(x as f32 + 0.5) / a, (y as f32 + 0.5) / a, (x as f32 + art.w as f32 - 0.5) / a, (y as f32 + art.h as f32 - 0.5) / a];
+        self.arts.insert(art.app_id, (slot, uv));
+    }
+
+    /// Next free artwork cell; when full, Plex artwork no longer on screen is recycled.
+    fn alloc_art_slot(&mut self) -> Option<usize> {
+        let capacity = ((ART_ATLAS / ART_CELL.0) * (ART_ATLAS / ART_CELL.1)) as usize;
+        if let Some(slot) = self.free_art.pop() {
+            return Some(slot);
+        }
+        if self.art_next < capacity {
+            self.art_next += 1;
+            return Some(self.art_next - 1);
+        }
+        let live: Vec<String> = self.rails[CONTINUE].ids();
+        let stale: Vec<String> = self.arts.keys().filter(|id| id.starts_with("plex:") && !live.contains(id)).cloned().collect();
+        for id in stale {
+            if let Some((slot, _)) = self.arts.remove(&id) {
+                self.free_art.push(slot);
+            }
+        }
+        self.free_art.pop()
     }
 
     /// Packs an icon into the shared atlas once and tints every tile of that app.
     pub fn add_icon(&mut self, icon: Icon, renderer: &Renderer) {
         if let Some(color) = icon.color {
             if !self.arts.contains_key(&icon.app_id) {
-                self.tint_app(&icon.app_id, Rgba::from_u8(color));
+                self.tint_id(&icon.app_id, Rgba::from_u8(color));
             }
         }
         if let Some(edge) = icon.edge_color() {
@@ -374,10 +537,13 @@ impl Home {
         (0..rail).filter(|&r| self.has(r)).count()
     }
 
+    // ---- Input ----------------------------------------------------------------------
+
     pub fn key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
         let action = match &self.mode {
             Mode::Menu(_) => self.menu_key(key),
             Mode::Move { .. } => self.move_key(key),
+            Mode::Setup { .. } => self.setup_key(key),
             Mode::Browse => self.browse_key(key, home_mode),
         };
         self.refocus(false);
@@ -400,10 +566,7 @@ impl Home {
                     self.active = rail;
                 }
             }
-            Key::Ok => {
-                let tile = self.focused()?;
-                return Some(Action::Launch { app_id: tile.launch_id.clone(), params: tile.params.clone() });
-            }
+            Key::Ok => return self.activate(),
             Key::LongOk if active == FAVORITES && count > 0 => {
                 self.mode = Mode::Menu(Menu { items: vec![MenuItem::Move, MenuItem::Hide, MenuItem::Cancel], focus: 0 });
             }
@@ -416,6 +579,59 @@ impl Home {
             _ => {}
         }
         None
+    }
+
+    fn activate(&mut self) -> Option<Action> {
+        let rail = &mut self.rails[self.active];
+        let tile = rail.tiles.get_mut(rail.focus)?;
+        match tile.kind {
+            Kind::App | Kind::Input { .. } | Kind::Media { .. } => {
+                Some(Action::Launch { app_id: tile.launch_id.clone(), params: tile.params.clone() })
+            }
+            Kind::Entity { on } => {
+                // Optimistic: lights flip at once; the next refresh confirms.
+                if let Some(on) = on {
+                    tile.kind = Kind::Entity { on: Some(!on) };
+                    tile.detail = if on { self.strings.off } else { self.strings.on }.to_string();
+                    tile.accent = if on { Rgba::hex(0x9AA3B2) } else { Rgba::hex(0xF2C14E) };
+                }
+                Some(Action::Service(ServiceRequest::HaAction(tile.id.clone())))
+            }
+            Kind::Setting { service, connected } => {
+                self.mode = Mode::Setup { service, closing_at: None };
+                match (service, connected) {
+                    (Service::HomeAssistant, false) => Some(Action::Service(ServiceRequest::HaSetup(true))),
+                    (Service::Plex, false) => Some(Action::Service(ServiceRequest::PlexLink(true))),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    fn setup_key(&mut self, key: Key) -> Option<Action> {
+        let Mode::Setup { service, .. } = self.mode else { return None };
+        let connected = match service {
+            Service::HomeAssistant => self.status.ha.is_some(),
+            Service::Plex => self.status.plex.is_some(),
+        };
+        match key {
+            Key::Back => {
+                self.mode = Mode::Browse;
+                match (service, connected) {
+                    (Service::HomeAssistant, false) => Some(Action::Service(ServiceRequest::HaSetup(false))),
+                    (Service::Plex, false) => Some(Action::Service(ServiceRequest::PlexLink(false))),
+                    _ => None,
+                }
+            }
+            Key::Ok if connected => {
+                self.mode = Mode::Browse;
+                Some(Action::Service(match service {
+                    Service::HomeAssistant => ServiceRequest::HaDisconnect,
+                    Service::Plex => ServiceRequest::PlexDisconnect,
+                }))
+            }
+            _ => None,
+        }
     }
 
     fn menu_key(&mut self, key: Key) -> Option<Action> {
@@ -515,9 +731,11 @@ impl Home {
         rail.tiles.get(rail.focus)
     }
 
+    // ---- Animation ------------------------------------------------------------------
+
     fn refocus(&mut self, instant: bool) {
         let moving = matches!(self.mode, Mode::Move { .. });
-        let menu = matches!(self.mode, Mode::Menu(_));
+        let overlay = matches!(self.mode, Mode::Menu(_) | Mode::Setup { .. });
         let active = self.active;
         for (r, rail) in self.rails.iter_mut().enumerate() {
             for (i, tile) in rail.tiles.iter_mut().enumerate() {
@@ -534,26 +752,11 @@ impl Home {
                 rail.scroll.snap();
             }
         }
-        self.overlay.target = if menu { 1.0 } else { 0.0 };
+        self.overlay.target = if overlay { 1.0 } else { 0.0 };
         self.lift.target = if moving { 1.0 } else { 0.0 };
         self.vscroll.target = -(self.rail_slot(active) as f32) * RAIL_PITCH;
 
-        let s = self.strings;
-        let next = self.focused().map(|tile| {
-            let (sub, hint) = match (tile.kind, active) {
-                _ if moving => (s.moving_hint.to_string(), None),
-                (Kind::Input { connected: true }, _) => (s.connected_press_ok.to_string(), None),
-                (Kind::Input { connected: false }, _) => (s.no_signal.to_string(), None),
-                (Kind::App, HIDDEN) => (s.hidden_app.to_string(), None),
-                (Kind::App, _) => (s.press_ok_to_open.to_string(), Some(s.hold_ok_for_options)),
-            };
-            Hero {
-                eyebrow: if moving { s.moving.to_uppercase() } else { self.rail_title(active).to_uppercase() },
-                title: tile.title.clone(),
-                sub,
-                hint,
-            }
-        });
+        let next = self.focused().map(|tile| self.hero_for(tile, moving));
         let changed = match (&self.hero, &next) {
             (Some(a), Some(b)) => a.title != b.title || a.eyebrow != b.eyebrow || a.sub != b.sub,
             (None, None) => false,
@@ -571,6 +774,25 @@ impl Home {
                 self.ambient = tile.accent;
             }
         }
+    }
+
+    fn hero_for(&self, tile: &Tile, moving: bool) -> Hero {
+        let s = self.strings;
+        let eyebrow = if moving { s.moving.to_uppercase() } else { self.rail_title(self.active).to_uppercase() };
+        let (sub, hint) = match (tile.kind, self.active) {
+            _ if moving => (s.moving_hint.to_string(), None),
+            (Kind::Input { connected: true }, _) => (s.connected_press_ok.to_string(), None),
+            (Kind::Input { connected: false }, _) => (s.no_signal.to_string(), None),
+            (Kind::App, HIDDEN) => (s.hidden_app.to_string(), None),
+            (Kind::App, _) => (s.press_ok_to_open.to_string(), Some(s.hold_ok_for_options)),
+            (Kind::Media { .. }, _) => (tile.detail.clone(), Some(s.opens_in_plex)),
+            (Kind::Entity { on: None }, _) => (tile.detail.clone(), Some(s.press_ok_to_activate)),
+            (Kind::Entity { .. }, _) => (tile.detail.clone(), Some(s.press_ok_to_toggle)),
+            (Kind::Setting { connected, .. }, _) => {
+                (tile.detail.clone(), Some(if connected { s.press_ok_to_manage } else { s.press_ok_to_connect }))
+            }
+        };
+        Hero { eyebrow, title: tile.title.clone(), sub, hint }
     }
 
     /// Advances animations; returns true while anything still moves.
@@ -601,6 +823,13 @@ impl Home {
                 moving = true;
             }
         }
+        if let Mode::Setup { closing_at: Some(at), .. } = self.mode {
+            if Instant::now() >= at {
+                self.mode = Mode::Browse;
+                self.refocus(false);
+            }
+            moving = true;
+        }
         moving
     }
 
@@ -619,12 +848,15 @@ impl Home {
         self.previous_hero = None;
     }
 
+    // ---- Drawing --------------------------------------------------------------------
+
     pub fn draw(&mut self, r: &mut Renderer, text: &mut Text, clock: &str, date: &str) {
         self.draw_backdrop(r);
         self.draw_header(r, text, clock, date);
         self.draw_hero(r, text);
         self.draw_rails(r, text);
         self.draw_menu(r, text);
+        self.draw_setup(r, text);
         self.draw_notice(r, text);
     }
 
@@ -643,10 +875,15 @@ impl Home {
         text.draw_top(r, "Vision", SAFE_X + 48.0, SAFE_TOP + 7.0, BRAND, TEXT);
 
         let clock_w = text.measure(r, clock, CLOCK);
-        let clock_x = LOGICAL_W - SAFE_X - clock_w;
-        text.draw(r, clock, clock_x, SAFE_TOP + 39.0, CLOCK, TEXT);
-        let date_w = text.measure(r, date, HEADER);
-        text.draw(r, date, clock_x - 40.0 - date_w, SAFE_TOP + 37.0, HEADER, TEXT.alpha(0.78));
+        let mut x = LOGICAL_W - SAFE_X - clock_w;
+        text.draw(r, clock, x, SAFE_TOP + 39.0, CLOCK, TEXT);
+        x -= 40.0 + text.measure(r, date, HEADER);
+        text.draw(r, date, x, SAFE_TOP + 37.0, HEADER, TEXT.alpha(0.78));
+        if let Some(weather) = self.weather {
+            let label = format!("{:.0}° · {}", weather.temperature, self.strings.weather(weather.code));
+            x -= 40.0 + text.measure(r, &label, HEADER);
+            text.draw(r, &label, x, SAFE_TOP + 37.0, HEADER, TEXT.alpha(0.78));
+        }
     }
 
     fn draw_hero(&self, r: &mut Renderer, text: &mut Text) {
@@ -695,7 +932,7 @@ impl Home {
                         alpha,
                         lifted,
                         icon: self.icons.get(&tile.id).copied(),
-                        art: self.arts.get(&tile.id).copied(),
+                        art: self.arts.get(&tile.id).map(|(_, uv)| *uv),
                         fill: self.blended.get(&tile.id).copied(),
                     };
                     match pass {
@@ -711,11 +948,11 @@ impl Home {
 
     fn draw_menu(&self, r: &mut Renderer, text: &mut Text) {
         let open = self.overlay.value.clamp(0.0, 1.0);
+        let Mode::Menu(menu) = &self.mode else { return };
         if open <= 0.01 {
             return;
         }
         r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(0.6 * open));
-        let Mode::Menu(menu) = &self.mode else { return };
         let Some(tile) = self.focused() else { return };
         let rail = &self.rails[self.active];
         let (row_h, pad, width) = (68.0, 16.0, 460.0);
@@ -725,9 +962,7 @@ impl Home {
         let x = tile_x.clamp(SAFE_X, LOGICAL_W - SAFE_X - width);
         let y = title_y - height - 24.0 + 16.0 * (1.0 - open);
         let panel = Rect::new(x, y, width, height);
-        r.shadow(panel.offset(0.0, 24.0), 22.0, 60.0, Rgba::hex(0).alpha(0.5 * open));
-        r.rect(panel, 22.0, Rgba::hex(0x14161C).alpha(0.96 * open));
-        r.stroke(panel, 22.0, 1.0, TEXT.alpha(0.14 * open));
+        draw_panel(r, panel, open);
         let row = |i: usize| Rect::new(x + pad, y + 64.0 + pad + i as f32 * row_h, width - 2.0 * pad, row_h - 8.0);
         r.rect(row(menu.focus), 16.0, TEXT.alpha(open));
         text.draw_top(r, &tile.title, x + 28.0, y + 24.0, MENU_TITLE, TEXT.alpha(0.6 * open));
@@ -742,6 +977,79 @@ impl Home {
             let rect = row(i);
             text.draw(r, label, rect.x + 22.0, rect.y + 40.0, MENU_ITEM, color.alpha(open));
         }
+    }
+
+    fn draw_setup(&self, r: &mut Renderer, text: &mut Text) {
+        let open = self.overlay.value.clamp(0.0, 1.0);
+        let Mode::Setup { service, .. } = self.mode else { return };
+        if open <= 0.01 {
+            return;
+        }
+        let s = self.strings;
+        r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(0.7 * open));
+        let panel = Rect::new(310.0, 230.0 + 20.0 * (1.0 - open), 1300.0, 600.0);
+        draw_panel(r, panel, open);
+        let (x, mut y) = (panel.x + 64.0, panel.y + 64.0);
+        let a = |v: f32| TEXT.alpha(v * open);
+        match service {
+            Service::HomeAssistant => {
+                if let Some(url) = &self.status.ha {
+                    text.draw_top(r, s.home_assistant, x, y, SETUP_TITLE, a(1.0));
+                    y += 90.0;
+                    text.draw_top(r, &format!("{} {url}", s.connected_to), x, y, SETUP_BODY, a(0.8));
+                    draw_button(r, text, s.disconnect, x, panel.y + panel.h - 140.0, open);
+                } else {
+                    text.draw_top(r, s.ha_setup_title, x, y, SETUP_TITLE, a(1.0));
+                    y += 96.0;
+                    for (i, step) in s.ha_setup_steps.iter().enumerate() {
+                        text.draw_top(r, &format!("{}.", i + 1), x, y, SETUP_BODY, a(0.5));
+                        let wrapped = wrap(text, r, step, SETUP_BODY, 640.0);
+                        for line in wrapped {
+                            text.draw_top(r, &line, x + 44.0, y, SETUP_BODY, a(0.85));
+                            y += 42.0;
+                        }
+                        y += 22.0;
+                    }
+                    if let Some(error) = &self.status.ha_error {
+                        text.draw_top(r, error, x, y + 10.0, SETUP_BODY, Rgba::hex(0xFF8A80).alpha(open));
+                    }
+                    if let Some((url, qr)) = &self.qr {
+                        let side = 380.0;
+                        let q = Rect::new(panel.x + panel.w - side - 64.0, panel.y + 64.0, side, side);
+                        draw_qr(r, qr, q, open);
+                        let w = text.measure(r, url, SETUP_SMALL);
+                        text.draw_top(r, url, q.x + (side - w) * 0.5, q.y + side + 22.0, SETUP_SMALL, a(0.6));
+                    }
+                }
+            }
+            Service::Plex => {
+                if let Some(account) = &self.status.plex {
+                    text.draw_top(r, s.plex, x, y, SETUP_TITLE, a(1.0));
+                    y += 90.0;
+                    text.draw_top(r, &format!("{} {account}", s.connected_to), x, y, SETUP_BODY, a(0.8));
+                    draw_button(r, text, s.disconnect, x, panel.y + panel.h - 140.0, open);
+                } else {
+                    text.draw_top(r, s.plex_setup_title, x, y, SETUP_TITLE, a(1.0));
+                    y += 96.0;
+                    text.draw_top(r, s.plex_setup_step, x, y, SETUP_BODY, a(0.85));
+                    y += 90.0;
+                    match (&self.status.plex_code, &self.status.plex_error) {
+                        (_, Some(error)) => {
+                            text.draw_top(r, error, x, y, SETUP_BODY, Rgba::hex(0xFF8A80).alpha(open));
+                        }
+                        (Some(code), None) => {
+                            text.draw_top(r, code, x - 6.0, y, SETUP_CODE, a(1.0));
+                            text.draw_top(r, s.waiting_for_plex, x, y + 180.0, SETUP_BODY, a(0.55));
+                        }
+                        (None, None) => {
+                            text.draw_top(r, s.waiting_for_plex, x, y, SETUP_BODY, a(0.55));
+                        }
+                    }
+                }
+            }
+        }
+        let hint_w = text.measure(r, s.back_to_close, SETUP_SMALL);
+        text.draw_top(r, s.back_to_close, panel.x + panel.w - 64.0 - hint_w, panel.y + panel.h - 64.0, SETUP_SMALL, a(0.45));
     }
 
     fn draw_notice(&self, r: &mut Renderer, text: &mut Text) {
@@ -764,6 +1072,66 @@ struct TileView {
     icon: Option<[f32; 5]>,
     art: Option<[f32; 4]>,
     fill: Option<Rgba>,
+}
+
+fn draw_panel(r: &mut Renderer, panel: Rect, open: f32) {
+    r.shadow(panel.offset(0.0, 24.0), 22.0, 60.0, Rgba::hex(0).alpha(0.5 * open));
+    r.rect(panel, 22.0, Rgba::hex(0x14161C).alpha(0.96 * open));
+    r.stroke(panel, 22.0, 1.0, TEXT.alpha(0.14 * open));
+}
+
+fn draw_button(r: &mut Renderer, text: &mut Text, label: &str, x: f32, y: f32, open: f32) {
+    let w = text.measure(r, label, MENU_ITEM) + 72.0;
+    let rect = Rect::new(x, y, w, 64.0);
+    r.rect(rect, 32.0, TEXT.alpha(open));
+    text.draw(r, label, x + 36.0, y + 42.0, MENU_ITEM, BG.alpha(open));
+}
+
+/// QR modules as merged horizontal runs on a white quiet-zone card.
+fn draw_qr(r: &mut Renderer, qr: &qrcodegen::QrCode, area: Rect, open: f32) {
+    r.rect(area, 18.0, Rgba::hex(0xFFFFFF).alpha(open));
+    let n = qr.size();
+    let quiet = 3;
+    let module = area.w / (n + 2 * quiet) as f32;
+    let ink = Rgba::hex(0x07080B).alpha(open);
+    for y in 0..n {
+        let mut x = 0;
+        while x < n {
+            if qr.get_module(x, y) {
+                let start = x;
+                while x < n && qr.get_module(x, y) {
+                    x += 1;
+                }
+                let rect = Rect::new(
+                    area.x + (start + quiet) as f32 * module,
+                    area.y + (y + quiet) as f32 * module,
+                    (x - start) as f32 * module + 0.5,
+                    module + 0.5,
+                );
+                r.rect(rect, 0.0, ink);
+            } else {
+                x += 1;
+            }
+        }
+    }
+}
+
+/// Greedy word wrap to `width`.
+fn wrap(text: &mut Text, r: &Renderer, line: &str, style: Style, width: f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in line.split(' ') {
+        let candidate = if current.is_empty() { word.to_string() } else { format!("{current} {word}") };
+        if !current.is_empty() && text.measure(r, &candidate, style) > width {
+            lines.push(std::mem::replace(&mut current, word.to_string()));
+        } else {
+            current = candidate;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 fn draw_hero_block(r: &mut Renderer, text: &mut Text, hero: &Hero, alpha: f32, dy: f32, accent: Rgba) {
@@ -798,9 +1166,20 @@ fn draw_tile_shapes(r: &mut Renderer, tile: &Tile, v: &TileView) {
         _ => tile.bg,
     };
     r.rect(rect, TILE_RADIUS, fill.fade(alpha));
-    if let Kind::Input { connected } = tile.kind {
-        let dot = if connected { CONNECTED } else { TEXT.alpha(0.3) };
-        r.rect(Rect::new(rect.x + 26.0, rect.y + rect.h * 0.5 - 6.0, 12.0, 12.0), 6.0, dot.fade(alpha));
+    match tile.kind {
+        Kind::Input { connected } | Kind::Setting { connected, .. } => {
+            let dot = if connected { CONNECTED } else { TEXT.alpha(0.3) };
+            r.rect(Rect::new(rect.x + 26.0, rect.y + rect.h * 0.5 - 6.0, 12.0, 12.0), 6.0, dot.fade(alpha));
+        }
+        Kind::Entity { on } => {
+            let lamp = match on {
+                Some(true) => Rgba::hex(0xF2C14E),
+                Some(false) => TEXT.alpha(0.25),
+                None => tile.accent.alpha(0.8),
+            };
+            r.rect(Rect::new(rect.x + 24.0, rect.y + 24.0, 16.0, 16.0), 8.0, lamp.fade(alpha));
+        }
+        _ => {}
     }
 }
 
@@ -821,7 +1200,8 @@ fn draw_tile_icon(r: &mut Renderer, atlas: Texture, v: &TileView) {
     let side = rect.h * if v.fill.is_some() { 0.86 } else { 0.58 };
     let (w, h) = if aspect >= 1.0 { (side * aspect.min(1.8), side) } else { (side, side / aspect) };
     let icon = Rect::new(rect.x + (rect.w - w) * 0.5, rect.y + (rect.h - h) * 0.5, w, h);
-    r.image(atlas, icon, [u0, v0, u1, v1], if v.fill.is_some() { 0.0 } else { 18.0 * rect.h / 170.0 }, Rgba::hex(0xFFFFFF).alpha(v.alpha));
+    let radius = if v.fill.is_some() { 0.0 } else { 18.0 * rect.h / 170.0 };
+    r.image(atlas, icon, [u0, v0, u1, v1], radius, Rgba::hex(0xFFFFFF).alpha(v.alpha));
 }
 
 fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: &TileView, s: &Strings) {
@@ -833,6 +1213,12 @@ fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: &TileView, 
         let ring = TEXT.lerp(tile.accent, v.lifted);
         r.stroke(rect.inflate(RING_OFFSET + RING_WIDTH * 0.5), TILE_RADIUS + RING_OFFSET, RING_WIDTH, ring.alpha(f * alpha));
     }
+    let label_below = |text: &mut Text, r: &mut Renderer| {
+        if f > 0.01 {
+            let w = text.measure(r, &tile.title, TILE_LABEL);
+            text.draw_top(r, &tile.title, rect.x + (rect.w - w) * 0.5, rect.y + rect.h + 22.0, TILE_LABEL, TEXT.alpha(f * alpha));
+        }
+    };
     match tile.kind {
         Kind::App => {
             if v.icon.is_none() && v.art.is_none() {
@@ -840,17 +1226,35 @@ fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: &TileView, 
                 let w = text.measure(r, &tile.title, style);
                 text.draw(r, &tile.title, rect.x + (rect.w - w) * 0.5, rect.y + rect.h * 0.5 + style.size * 0.35, style, TEXT.alpha(alpha));
             }
-            if f > 0.01 {
-                let w = text.measure(r, &tile.title, TILE_LABEL);
-                let x = rect.x + (rect.w - w) * 0.5;
-                text.draw_top(r, &tile.title, x, rect.y + rect.h + 22.0, TILE_LABEL, TEXT.alpha(f * alpha));
+            label_below(text, r);
+        }
+        Kind::Media { progress } => {
+            if v.art.is_none() {
+                let style = fit(text, r, &tile.title, MONOGRAM, rect.w - 40.0);
+                let w = text.measure(r, &tile.title, style);
+                text.draw(r, &tile.title, rect.x + (rect.w - w) * 0.5, rect.y + rect.h * 0.5 + style.size * 0.35, style, TEXT.alpha(alpha));
             }
+            let track = Rect::new(rect.x + 18.0, rect.y + rect.h - 18.0, rect.w - 36.0, 5.0);
+            r.rect(track, 2.5, Rgba::hex(0x000000).alpha(0.45 * alpha));
+            r.rect(Rect::new(track.x, track.y, track.w * progress, track.h), 2.5, TEXT.alpha(0.95 * alpha));
+            label_below(text, r);
+        }
+        Kind::Entity { .. } => {
+            let style = fit(text, r, &tile.title, ENTITY_NAME, rect.w - 48.0);
+            text.draw(r, &tile.title, rect.x + 24.0, rect.y + rect.h - 52.0, style, TEXT.alpha(alpha));
+            text.draw(r, &tile.detail, rect.x + 24.0, rect.y + rect.h - 22.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
         }
         Kind::Input { connected } => {
             let x = rect.x + 52.0;
             text.draw(r, &tile.title, x, rect.y + rect.h * 0.5 - 2.0, INPUT_LABEL, TEXT.alpha(alpha));
             let sub = if connected { s.connected } else { s.no_signal };
             text.draw(r, sub, x, rect.y + rect.h * 0.5 + 26.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
+        }
+        Kind::Setting { .. } => {
+            let x = rect.x + 52.0;
+            let style = fit(text, r, &tile.title, INPUT_LABEL, rect.w - 70.0);
+            text.draw(r, &tile.title, x, rect.y + rect.h * 0.5 - 2.0, style, TEXT.alpha(alpha));
+            text.draw(r, &tile.detail, x, rect.y + rect.h * 0.5 + 26.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
         }
     }
 }

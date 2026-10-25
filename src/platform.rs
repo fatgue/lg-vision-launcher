@@ -11,6 +11,7 @@ pub const APP_ID: &str = "com.vision.launcher";
 
 pub struct Platform {
     requests: Sender<Request>,
+    sink: Sink,
     pub updates: Receiver<Update>,
 }
 
@@ -19,15 +20,21 @@ impl Platform {
         let (requests, request_rx) = mpsc::channel();
         let (update_tx, updates) = mpsc::channel();
         let sink = Sink { tx: update_tx, waker };
+        let worker_sink = sink.clone();
         std::thread::Builder::new()
             .name("platform".into())
-            .spawn(move || backend::run(request_rx, sink, data_dir))
+            .spawn(move || backend::run(request_rx, worker_sink, data_dir))
             .expect("platform thread");
-        Self { requests, updates }
+        Self { requests, sink, updates }
     }
 
     pub fn send(&self, request: Request) {
         let _ = self.requests.send(request);
+    }
+
+    /// Another producer for the same update queue (the network services thread).
+    pub fn sink(&self) -> Sink {
+        self.sink.clone()
     }
 }
 

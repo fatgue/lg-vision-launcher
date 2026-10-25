@@ -4,6 +4,8 @@
 //! running animation) and otherwise sleeps in SDL_WaitEventTimeout: 0 % GPU when idle.
 mod anim;
 mod color;
+mod companion;
+mod config;
 mod dynlib;
 mod gl;
 mod home;
@@ -12,9 +14,11 @@ mod log;
 mod luna;
 #[cfg_attr(not(all(target_os = "linux", target_arch = "arm")), allow(dead_code))]
 mod model;
+mod net;
 mod platform;
 mod render;
 mod sdl;
+mod services;
 #[cfg_attr(not(all(target_os = "linux", target_arch = "arm")), allow(dead_code))]
 mod storage;
 mod strings;
@@ -23,10 +27,11 @@ mod theme;
 
 use crate::home::{Action, Home, Key};
 use crate::log::log;
-use crate::model::{Request, Update};
+use crate::model::{Request, ServiceRequest, Update};
 use crate::platform::{Platform, APP_ID};
 use crate::render::Renderer;
 use crate::sdl::{Event, Sdl};
+use crate::services::Services;
 use crate::text::Text;
 use chrono::{Datelike, Timelike};
 use std::ffi::{c_int, CString};
@@ -128,8 +133,10 @@ fn run(started: Instant) -> Result<(), String> {
     let mut text = Text::new(&renderer, prewarmed);
     log!("glyphs: {} prewarmed, waited {} ms", text.glyph_count(), glyph_wait.elapsed().as_millis());
     let mut home = Home::new(&renderer, prefs);
-    let platform = Platform::start(sdl.waker(), data_dir);
+    let platform = Platform::start(sdl.waker(), data_dir.clone());
     platform.send(Request::Refresh);
+    let services = Services::start(platform.sink(), data_dir);
+    let io = Io { platform: &platform, services: &services };
     log!("init: {} ms", started.elapsed().as_millis());
 
     let mut perf = Perf::default();
@@ -172,7 +179,7 @@ fn run(started: Instant) -> Result<(), String> {
                         }
                     }
                     Some(key) => {
-                        if apply(&mut home, &platform, key) {
+                        if apply(&mut home, &io, key) {
                             break 'main;
                         }
                         dirty = true;
@@ -180,7 +187,7 @@ fn run(started: Instant) -> Result<(), String> {
                     None => {}
                 },
                 sdl::KEYUP if map_key(event.key_sym()) == Some(Key::Ok) => {
-                    if ok_down.take().is_some() && !long_fired && apply(&mut home, &platform, Key::Ok) {
+                    if ok_down.take().is_some() && !long_fired && apply(&mut home, &io, Key::Ok) {
                         break 'main;
                     }
                     dirty = true;
@@ -191,10 +198,14 @@ fn run(started: Instant) -> Result<(), String> {
                     | sdl::WINDOWEVENT_SIZE_CHANGED
                     | sdl::WINDOWEVENT_RESTORED
                     | sdl::WINDOWEVENT_FOCUS_GAINED => {
+                        if !visible {
+                            services.send(ServiceRequest::Visible(true));
+                        }
                         visible = true;
                         dirty = true;
                     }
                     sdl::WINDOWEVENT_FOCUS_LOST => {
+                        services.send(ServiceRequest::Visible(false));
                         visible = false;
                         animating = false;
                         home.settle();
@@ -207,6 +218,7 @@ fn run(started: Instant) -> Result<(), String> {
                     platform.send(Request::Refresh);
                 }
                 sdl::APP_DIDENTERBACKGROUND => {
+                    services.send(ServiceRequest::Visible(false));
                     visible = false;
                     animating = false;
                     home.settle();
@@ -218,7 +230,7 @@ fn run(started: Instant) -> Result<(), String> {
         if let (Some(down), false) = (ok_down, long_fired) {
             if down.elapsed().as_millis() >= LONG_PRESS_MS {
                 long_fired = true;
-                apply(&mut home, &platform, Key::LongOk);
+                apply(&mut home, &io, Key::LongOk);
                 dirty = true;
             }
         }
@@ -229,6 +241,10 @@ fn run(started: Instant) -> Result<(), String> {
                 Update::Icon(icon) => home.add_icon(icon, &renderer),
                 Update::Art(art) => home.add_art(art, &renderer),
                 Update::Notice(message) => home.notice(message),
+                Update::Weather(weather) => home.set_weather(weather),
+                Update::Entities(entities) => home.set_entities(entities),
+                Update::Media(items) => home.set_media(items),
+                Update::Status(status) => home.set_status(status),
             }
             dirty = true;
         }
@@ -241,7 +257,7 @@ fn run(started: Instant) -> Result<(), String> {
         // Scripted keys (previews/benchmarks): one every 12 frames once data has arrived.
         if home.loaded && frames >= 20 && frames % 12 == 0 {
             if let Some(key) = options.keys.get(((frames - 20) / 12) as usize) {
-                apply(&mut home, &platform, *key);
+                apply(&mut home, &io, *key);
                 dirty = true;
             }
         }
@@ -294,14 +310,22 @@ fn run(started: Instant) -> Result<(), String> {
     Ok(())
 }
 
+/// Where actions go: TV services (Luna) and network services.
+struct Io<'a> {
+    platform: &'a Platform,
+    services: &'a Services,
+}
+
 /// Feeds a key to the home screen and dispatches the resulting action. Returns true to quit.
-fn apply(home: &mut Home, platform: &Platform, key: Key) -> bool {
+fn apply(home: &mut Home, io: &Io, key: Key) -> bool {
+    let platform = io.platform;
     match home.key(key, false) {
         Some(Action::Launch { app_id, params }) => {
             log!("launch {app_id}");
             platform.send(Request::Launch { app_id, params });
         }
         Some(Action::SavePrefs(prefs)) => platform.send(Request::SavePrefs(prefs)),
+        Some(Action::Service(request)) => io.services.send(request),
         // On the TV, Back on the first tile hands over to LG's Home and Vision stays resident,
         // so the next launch is a warm relaunch instead of a cold start.
         Some(Action::Exit) if WEBOS => {

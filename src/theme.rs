@@ -34,6 +34,11 @@ pub const NOTICE: Style = Style::new(Weight::Regular, 22.0);
 pub const HINT: Style = Style::new(Weight::Regular, 24.0);
 pub const MENU_TITLE: Style = Style::new(Weight::Medium, 24.0);
 pub const MENU_ITEM: Style = Style::new(Weight::Medium, 28.0);
+pub const ENTITY_NAME: Style = Style::new(Weight::SemiBold, 26.0);
+pub const SETUP_TITLE: Style = Style::new(Weight::SemiBold, 52.0).tracking(-0.01);
+pub const SETUP_BODY: Style = Style::new(Weight::Regular, 30.0);
+pub const SETUP_SMALL: Style = Style::new(Weight::Regular, 22.0);
+pub const SETUP_CODE: Style = Style::new(Weight::SemiBold, 150.0).tracking(0.12);
 
 pub fn hero(size: f32) -> Style {
     Style::new(Weight::SemiBold, size).tracking(-0.02)
@@ -60,6 +65,11 @@ pub fn prewarm_jobs(strings: &Strings) -> Vec<(Style, String)> {
         (TILE_LABEL, latin.clone()),
         (MONOGRAM, latin.clone()),
         (INPUT_LABEL, latin.clone()),
+        (ENTITY_NAME, latin.clone()),
+        (SETUP_TITLE, ui.clone()),
+        (SETUP_BODY, latin.clone() + &ui),
+        (SETUP_SMALL, latin.clone() + &ui),
+        (SETUP_CODE, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".to_string()),
     ];
     for size in &HERO_SIZES[..2] {
         jobs.push((hero(*size), latin.clone()));

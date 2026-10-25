@@ -69,8 +69,67 @@ pub enum Update {
     Apps(Vec<App>),
     Inputs(Vec<Input>),
     Icon(Icon),
+    /// Tile artwork; `app_id` is an app id or `plex:<ratingKey>`.
     Art(Icon),
     Notice(Notice),
+    Weather(Option<Weather>),
+    Entities(Vec<Entity>),
+    Media(Vec<MediaItem>),
+    Status(Status),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Weather {
+    pub temperature: f32,
+    /// WMO weather interpretation code.
+    pub code: u32,
+}
+
+/// A Home Assistant entity shown as a tile.
+#[derive(Clone, Debug)]
+pub struct Entity {
+    pub id: String,
+    pub name: String,
+    pub domain: String,
+    pub on: Option<bool>,
+    pub brightness: Option<u8>,
+}
+
+/// A Plex "Continue watching" item.
+#[derive(Clone, Debug)]
+pub struct MediaItem {
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub progress: f32,
+    pub remaining_min: u32,
+}
+
+/// Connection state of the optional services, for the Settings row and setup panels.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Status {
+    /// Connected Home Assistant address.
+    pub ha: Option<String>,
+    /// Phone setup address while pairing.
+    pub ha_setup: Option<String>,
+    pub ha_error: Option<String>,
+    /// Connected Plex account.
+    pub plex: Option<String>,
+    /// plex.tv/link code while linking.
+    pub plex_code: Option<String>,
+    pub plex_error: Option<String>,
+    pub tivione: Option<bool>,
+}
+
+pub enum ServiceRequest {
+    Visible(bool),
+    HaAction(String),
+    HaSetup(bool),
+    HaConfigured { url: String, token: String },
+    HaDisconnect,
+    PlexLink(bool),
+    PlexDisconnect,
+    TiviOne(bool),
 }
 
 pub enum Request {
@@ -236,6 +295,31 @@ fn logo_crop(rgba: &[u8], w: usize, h: usize) -> Result<(usize, usize, usize, us
     let left = (cx - cw / 2.0).clamp(0.0, w as f32 - cw);
     let top = (cy - ch / 2.0).clamp(0.0, h as f32 - ch);
     Ok((left as usize, top as usize, cw as usize, ch as usize))
+}
+
+/// Fits any RGBA image into a 320×180 tile image by centred cover-cropping.
+pub fn art_from_rgba(app_id: &str, rgba: &[u8], w: usize, h: usize) -> Icon {
+    let crop = cover_crop(w, h);
+    let pixels = resample(rgba, w, crop, ART_W, ART_H);
+    Icon { app_id: app_id.to_string(), w: ART_W as u32, h: ART_H as u32, color: dominant_color(&pixels), pixels }
+}
+
+/// Decodes a JPEG (Plex artwork) to RGBA.
+pub fn decode_jpeg(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), String> {
+    let mut decoder = jpeg_decoder::Decoder::new(bytes);
+    let pixels = decoder.decode().map_err(|e| e.to_string())?;
+    let info = decoder.info().ok_or("jpeg without info")?;
+    let (w, h) = (info.width as usize, info.height as usize);
+    let rgba = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => pixels.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        _ => return Err("unsupported jpeg format".into()),
+    };
+    Ok((rgba, w, h))
+}
+
+pub fn decode_png_rgba(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), String> {
+    decode_png(bytes)
 }
 
 fn decode_png(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), String> {
