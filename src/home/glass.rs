@@ -73,6 +73,14 @@ impl Home {
         y
     }
 
+    /// Bottom of the last row (or of the grid), before scrolling.
+    fn glass_content_bottom(&self) -> f32 {
+        match self.glass_rows().last() {
+            Some(rail) => self.glass_row_top(rail) + ROW_TITLE + self.rails[rail].tile_h,
+            None => GRID_TOP + self.grid_rows() as f32 * ROW_PITCH,
+        }
+    }
+
     /// What the Top Shelf shows: the content rails of the focused app in the grid's top row.
     pub(super) fn shelf_rails(&self) -> &'static [usize] {
         let favorites = &self.rails[FAVORITES];
@@ -80,7 +88,7 @@ impl Home {
             return &[];
         }
         let Some(app) = favorites.tiles.get(favorites.focus) else { return &[] };
-        let rails: &'static [usize] = if app.id == TIVIONE_APP && self.tv.is_some() {
+        let rails: &'static [usize] = if (app.id == TIVIONE_APP || app.title == "TiviOne") && self.tv.is_some() {
             &[TV_RECENT, TV_FAVORITES, TV_CATCHUP, TV_COMING]
         } else if app.id == PLEX_APP || app.title == "Plex" {
             &[CONTINUE]
@@ -153,6 +161,9 @@ impl Home {
         } else {
             FOCUS_Y - self.glass_row_top(self.active)
         };
+        // Never scroll past the end: the last row stays near the bottom edge.
+        let end = (LOGICAL_H - 60.0 - self.glass_content_bottom()).min(0.0);
+        self.vscroll.target = self.vscroll.target.max(end);
         if in_shelf {
             // Keep the focused card inside the safe area.
             let x = self.shelf_x(self.active, self.rails[self.active].focus);
@@ -229,7 +240,7 @@ impl Home {
                 draw_hero_block(r, text, hero, open * fade * t, -60.0, WHITE, PREVIEW_RECT.x - SAFE_X - 40.0);
             }
         }
-        self.glass_header(r, text, &clock, &date);
+        self.glass_header(r, text, &clock, &date, fade);
         self.glass_grid(r, text, dy);
         self.glass_row_tiles(r, text, dy);
         self.draw_menu(r, text);
@@ -277,18 +288,22 @@ impl Home {
         }
     }
 
-    fn glass_header(&self, r: &mut Renderer, text: &mut Text, clock: &str, date: &str) {
+    /// Clock, date and weather at the top right; they scroll away with the shelf.
+    fn glass_header(&self, r: &mut Renderer, text: &mut Text, clock: &str, date: &str, fade: f32) {
+        if fade <= 0.01 {
+            return;
+        }
         let mut x = LOGICAL_W - SAFE_X - text.measure(r, clock, GLASS_CLOCK);
-        text.draw(r, clock, x, SAFE_TOP + 36.0, GLASS_CLOCK, WHITE.alpha(0.92));
+        text.draw(r, clock, x, SAFE_TOP + 36.0, GLASS_CLOCK, WHITE.alpha(0.92 * fade));
         if !date.is_empty() {
             x -= 32.0 + text.measure(r, date, HEADER);
-            text.draw(r, date, x, SAFE_TOP + 34.0, HEADER, WHITE.alpha(0.7));
+            text.draw(r, date, x, SAFE_TOP + 34.0, HEADER, WHITE.alpha(0.7 * fade));
         }
         if let Some(weather) = self.weather.filter(|_| self.prefs.ui.weather) {
             let temperature = if self.prefs.ui.fahrenheit { weather.temperature * 9.0 / 5.0 + 32.0 } else { weather.temperature };
             let label = format!("{temperature:.0}° · {}", self.strings.weather(weather.code));
             x -= 32.0 + text.measure(r, &label, HEADER);
-            text.draw(r, &label, x, SAFE_TOP + 34.0, HEADER, WHITE.alpha(0.7));
+            text.draw(r, &label, x, SAFE_TOP + 34.0, HEADER, WHITE.alpha(0.7 * fade));
         }
     }
 

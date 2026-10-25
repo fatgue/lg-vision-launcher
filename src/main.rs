@@ -307,7 +307,8 @@ fn run(started: Instant) -> Result<(), String> {
                 }
                 // Magic Remote: the pointer focuses what it is over; its button acts as OK
                 // (held = long press), the wheel steps along the row.
-                sdl::MOUSEMOTION => {
+                // Scripted runs (--frames) ignore the mouse, so screenshots don't depend on it.
+                sdl::MOUSEMOTION if options.frames.is_none() => {
                     let (x, y) = event.mouse_xy();
                     let (lx, ly) = to_logical(&sdl, window, x, y);
                     let moved = match pointer_lock {

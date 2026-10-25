@@ -62,7 +62,48 @@ fn save_prefs(prefs: &storage::Prefs, data_dir: &std::path::Path) {
 mod backend {
     //! Desktop preview: fixed sample inventory, never touches TV services.
     use super::*;
-    use crate::model::{App, Input, Notice};
+    use crate::model::{App, Input, MediaItem, Notice, Programme, TvCatchup, TvChannel, TvFeed, TvReminder};
+
+    /// Plex "continue watching" for the preview.
+    fn sample_media() -> Vec<MediaItem> {
+        [("Spring", "Short film", 0.35, 6), ("Sintel", "Open movie", 0.6, 6), ("Tears of Steel", "Open movie", 0.2, 10)]
+            .iter()
+            .enumerate()
+            .map(|(i, (title, subtitle, progress, left))| MediaItem {
+                id: format!("sample{i}"),
+                title: title.to_string(),
+                subtitle: subtitle.to_string(),
+                progress: *progress,
+                remaining_min: *left,
+            })
+            .collect()
+    }
+
+    /// A TiviOne snapshot with neutral demo channels, timed around the (possibly fixed) clock.
+    fn sample_tv() -> TvFeed {
+        let now = crate::clock::utc_ms();
+        let hour = now - now.rem_euclid(1_800_000);
+        let names = ["Animation One", "Sci-Fi Channel", "Fantasy HD", "Open Cinema", "Family TV", "Future Lab"];
+        let shows = ["Big Buck Bunny", "Tears of Steel", "Legends & Myths", "Sintel", "Animal Friends", "Science Hour"];
+        let mut feed = TvFeed { playlist_id: 1, ..TvFeed::default() };
+        for (i, (name, show)) in names.iter().zip(shows).enumerate() {
+            let id = i as i64 + 1;
+            feed.channels.insert(id, TvChannel { name: name.to_string(), number: Some(id as u32) });
+            feed.numbers.insert(id as u32, id);
+            feed.guide.insert(
+                id,
+                vec![
+                    Programme { title: show.to_string(), start: hour, end: hour + 1_800_000 },
+                    Programme { title: "Coming up next".into(), start: hour + 1_800_000, end: hour + 3_600_000 },
+                ],
+            );
+        }
+        feed.recent = vec![1, 2, 3, 4, 5, 6];
+        feed.favorites = vec![2, 4];
+        feed.catchup = vec![TvCatchup { channel: 4, title: "Elephants Dream".into(), start: hour - 3_600_000, end: hour - 1_800_000 }];
+        feed.reminders = vec![TvReminder { channel: 3, title: "Cosmos Laundromat".into(), start: hour + 3_600_000 }];
+        feed
+    }
 
     pub fn run(requests: Receiver<Request>, sink: Sink, data_dir: PathBuf) {
         let mut release_checked = false;
@@ -110,6 +151,8 @@ mod backend {
                             })
                             .collect(),
                     ));
+                    sink.send(Update::Media(sample_media()));
+                    sink.send(Update::Tv(Some(sample_tv())));
                 }
                 Request::Launch { app_id, .. } => {
                     log!("preview: would launch {app_id}");

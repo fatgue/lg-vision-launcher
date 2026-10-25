@@ -26,6 +26,11 @@ const scenes = {
   'settings-items': 'up,ok,right,down',
   'settings-appearance': 'up,ok,down,down,down,down,down,right',
   header: 'up',
+  tivione: 'right,right',
+  'shelf-open': 'right,right,up',
+  'shelf-strip': 'right,right,up,right,right,right,right,right,right,right',
+  move: 'hold,ok,down,right',
+  bottom: 'down,down,down,down',
 };
 
 mkdirSync(out, { recursive: true });
