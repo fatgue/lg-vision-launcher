@@ -24,6 +24,7 @@ mod storage;
 mod strings;
 mod text;
 mod theme;
+mod video;
 
 use crate::home::{Action, Home, Key};
 use crate::log::log;
@@ -112,10 +113,12 @@ fn run(started: Instant) -> Result<(), String> {
         return Ok(());
     }
     let assets = find_assets(&exe_dir)?;
-    // Fonts load and UI glyphs rasterise in parallel with SDL/GL bring-up.
-    let glyphs = text::prewarm(assets.join("fonts"), theme::prewarm_jobs(strings::current()));
     let data_dir = storage::data_dir(WEBOS);
     let prefs = storage::Prefs::load(&data_dir);
+    // Language: the user's choice, else the TV's.
+    strings::set(&if prefs.ui.language.is_empty() { strings::system_language() } else { prefs.ui.language.clone() });
+    // Fonts load and UI glyphs rasterise in parallel with SDL/GL bring-up.
+    let glyphs = text::prewarm(assets.join("fonts"), theme::prewarm_jobs(strings::current()));
 
     if WEBOS {
         // SDL-webOS reads APPID for its shell surface and WMCLASS from the environment.
@@ -164,8 +167,9 @@ fn run(started: Instant) -> Result<(), String> {
     }
     let platform = Platform::start(sdl.waker(), data_dir.clone());
     platform.send(Request::Refresh);
-    let services = Services::start(platform.sink(), data_dir);
-    let io = Io { platform: &platform, services: &services, home_mode };
+    let services = Services::start(platform.sink(), data_dir.clone());
+    let preview = video::Video::start(&sdl_candidates(&exe_dir), home::PREVIEW_RECT, if home_mode { HOME_ID } else { APP_ID }, &data_dir);
+    let io = Io { platform: &platform, services: &services, home_mode, video: &preview };
     log!("init: {} ms", started.elapsed().as_millis());
 
     let mut perf = Perf::default();
@@ -274,6 +278,7 @@ fn run(started: Instant) -> Result<(), String> {
                     | sdl::WINDOWEVENT_SIZE_CHANGED
                     | sdl::WINDOWEVENT_RESTORED
                     | sdl::WINDOWEVENT_FOCUS_GAINED => {
+                        home.set_visible(true);
                         if !visible {
                             services.send(ServiceRequest::Visible(true));
                         }
@@ -281,6 +286,7 @@ fn run(started: Instant) -> Result<(), String> {
                         dirty = true;
                     }
                     sdl::WINDOWEVENT_FOCUS_LOST => {
+                        home.set_visible(false);
                         services.send(ServiceRequest::Visible(false));
                         visible = false;
                         animating = false;
@@ -289,11 +295,13 @@ fn run(started: Instant) -> Result<(), String> {
                     _ => {}
                 },
                 sdl::APP_DIDENTERFOREGROUND => {
+                    home.set_visible(true);
                     visible = true;
                     dirty = true;
                     platform.send(Request::Refresh);
                 }
                 sdl::APP_DIDENTERBACKGROUND => {
+                    home.set_visible(false);
                     services.send(ServiceRequest::Visible(false));
                     visible = false;
                     animating = false;
@@ -351,8 +359,8 @@ fn run(started: Instant) -> Result<(), String> {
         let frame_start = Instant::now();
         let dt = frame_start.duration_since(last_frame).as_secs_f32().min(0.05);
         last_frame = frame_start;
-        animating = home.update(dt);
-        if let Some(action) = home.take_action() {
+        animating = home.update(dt) || home.waiting();
+        while let Some(action) = home.take_action() {
             dispatch(action, &io);
         }
         dirty = false;
@@ -400,6 +408,7 @@ struct Io<'a> {
     platform: &'a Platform,
     services: &'a Services,
     home_mode: bool,
+    video: &'a video::Video,
 }
 
 /// Feeds a key to the home screen and dispatches the resulting action. Returns true to quit.
@@ -413,7 +422,11 @@ fn apply(home: &mut Home, io: &Io, key: Key) -> bool {
 fn dispatch(action: Action, io: &Io) -> bool {
     let platform = io.platform;
     match Some(action) {
+        Some(Action::Preview(Some(stream))) => io.video.show(stream),
+        Some(Action::Preview(None)) => io.video.hide(),
         Some(Action::Launch { app_id, params }) => {
+            // The app about to start needs the video decoder: release the preview first.
+            io.video.hide();
             log!("launch {app_id}");
             platform.send(Request::Launch { app_id, params });
         }

@@ -377,6 +377,17 @@ impl Renderer {
         self.quad(r, [0.0; 4], c, params, [top, bottom], KIND_FILL);
     }
 
+    /// Writes fully transparent pixels: the hardware video plane below shows through.
+    pub fn punch(&mut self, r: Rect) {
+        self.flush();
+        // SAFETY: state toggles on the current context.
+        unsafe { (self.gl.disable)(gl::BLEND) };
+        let c = (r.x + r.w * 0.5, r.y + r.h * 0.5);
+        self.quad(r, [0.0; 4], c, [r.w * 0.5, r.h * 0.5, 0.0, 1.0], [Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }; 2], KIND_FILL);
+        self.flush();
+        unsafe { (self.gl.enable)(gl::BLEND) };
+    }
+
     pub fn glyph(&mut self, texture: Texture, r: Rect, uv: [f32; 4], color: Rgba) {
         self.bind(texture.id);
         self.quad(r, uv, (0.0, 0.0), [0.0; 4], [color; 2], KIND_GLYPH);

@@ -3,6 +3,7 @@ use crate::anim::Spring;
 use crate::color::Rgba;
 use crate::gl;
 use crate::model::{App, Entity, HaCategory, Icon, Input, MediaItem, Notice, ServiceRequest, Status, TvFeed, Weather, TIVIONE_APP};
+use crate::video::Stream;
 use std::collections::HashSet;
 use crate::render::{Rect, Renderer, Texture, LOGICAL_H, LOGICAL_W};
 use crate::storage::Prefs;
@@ -26,10 +27,15 @@ const FAVORITES: usize = 0;
 const CONTINUE: usize = 1;
 const TV_RECENT: usize = 2;
 const TV_FAVORITES: usize = 3;
-const TV_COMING: usize = 4;
-const HOME: usize = 5;
-const INPUTS: usize = 6;
-const HIDDEN: usize = 7;
+const TV_CATCHUP: usize = 4;
+const TV_COMING: usize = 5;
+const HOME: usize = 6;
+const INPUTS: usize = 7;
+const HIDDEN: usize = 8;
+/// Where the live preview plays (16:9, right of the hero text).
+pub const PREVIEW_RECT: Rect = Rect::new(1000.0, 150.0, 824.0, 464.0);
+/// Focus must rest this long on a channel before its preview starts.
+const PREVIEW_DWELL: Duration = Duration::from_millis(900);
 const DIGIT_WAIT: Duration = Duration::from_millis(1600);
 const PLEX_APP: &str = "cdp-30";
 
@@ -39,6 +45,8 @@ pub enum Action {
     Service(ServiceRequest),
     HomeTakeover(bool),
     RefreshImages,
+    /// Start (Some) or stop (None) the live preview.
+    Preview(Option<Stream>),
     Exit,
 }
 
@@ -73,6 +81,7 @@ enum Kind {
     Setting { service: Service, connected: bool },
     Channel { id: i64 },
     Reminder { id: i64, start: i64 },
+    Catchup { id: i64, start: i64, end: i64 },
 }
 
 struct Tile {
@@ -240,7 +249,7 @@ impl Picker {
 /// Rows the user can switch off, with the rails they cover.
 const ROW_KEYS: [(&str, &[usize]); 5] = [
     ("continue", &[CONTINUE]),
-    ("tv", &[TV_RECENT, TV_FAVORITES, TV_COMING]),
+    ("tv", &[TV_RECENT, TV_FAVORITES, TV_CATCHUP, TV_COMING]),
     ("home", &[HOME]),
     ("inputs", &[INPUTS]),
     ("hidden", &[HIDDEN]),
@@ -258,6 +267,8 @@ enum SettingId {
     Row(usize),
     Ambient,
     Motion,
+    Preview,
+    Language,
     RefreshImages,
     Info,
 }
@@ -294,7 +305,7 @@ struct Hero {
 
 pub struct Home {
     strings: &'static Strings,
-    rails: [Rail; 8],
+    rails: [Rail; 9],
     active: usize,
     mode: Mode,
     prefs: Prefs,
@@ -304,7 +315,13 @@ pub struct Home {
     tv: Option<TvFeed>,
     offered: bool,
     digits: Option<(String, Instant)>,
-    pending: Option<Action>,
+    pending: Vec<Action>,
+    /// Channel whose live preview is playing, and where focus currently rests.
+    preview: Option<i64>,
+    dwell: Option<(i64, Instant)>,
+    visible: bool,
+    /// The TV's own UI language (read once).
+    system_language: String,
     vscroll: Spring,
     overlay: Spring,
     lift: Spring,
@@ -351,6 +368,7 @@ impl Home {
                 Rail::new(300.0, 170.0),
                 Rail::new(300.0, 150.0),
                 Rail::new(300.0, 150.0),
+                Rail::new(300.0, 150.0),
                 Rail::new(300.0, 120.0),
                 Rail::new(300.0, 170.0),
             ],
@@ -363,7 +381,11 @@ impl Home {
             tv: None,
             offered: false,
             digits: None,
-            pending: None,
+            pending: Vec::new(),
+            preview: None,
+            dwell: None,
+            visible: true,
+            system_language: crate::strings::system_language(),
             vscroll: Spring::new(0.0, 14.0),
             overlay: Spring::new(0.0, 22.0),
             lift: Spring::new(0.0, 18.0),
@@ -472,6 +494,7 @@ impl Home {
             CONTINUE => s.continue_watching,
             TV_RECENT => s.tv_recent,
             TV_FAVORITES => s.tv_favorites,
+            TV_CATCHUP => s.catch_up,
             TV_COMING => s.tv_coming,
             HOME => s.home,
             INPUTS => s.inputs,
@@ -675,7 +698,7 @@ impl Home {
     pub fn set_tv(&mut self, feed: Option<TvFeed>) {
         self.tv = feed;
         let Some(tv) = &self.tv else {
-            for rail in [TV_RECENT, TV_FAVORITES, TV_COMING] {
+            for rail in [TV_RECENT, TV_FAVORITES, TV_CATCHUP, TV_COMING] {
                 self.rails[rail].replace(Vec::new());
             }
             self.fix_active();
@@ -713,8 +736,26 @@ impl Home {
                 tile
             })
             .collect();
+        let catchup: Vec<Tile> = tv
+            .catchup
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut tile = Tile::new(format!("catchup:{}:{}", c.channel, c.start), c.title.clone(), Kind::Catchup { id: c.channel, start: c.start, end: c.end }, i);
+                tile.detail = tv.channels.get(&c.channel).map(|ch| ch.name.clone()).unwrap_or_default();
+                tile.launch_id = TIVIONE_APP.into();
+                tile.params = Some(serde_json::json!({
+                    "catchup": { "channelId": c.channel, "startMs": c.start, "stopMs": c.end, "title": c.title },
+                    "playlistId": tv.playlist_id,
+                }));
+                tile.bg = Rgba::hex(0x161A24);
+                tile.accent = Rgba::hex(0x7FB2FF);
+                tile
+            })
+            .collect();
         self.rails[TV_RECENT].replace(recent);
         self.rails[TV_FAVORITES].replace(favorites);
+        self.rails[TV_CATCHUP].replace(catchup);
         self.rails[TV_COMING].replace(coming);
         self.fix_active();
         self.refocus(false);
@@ -729,7 +770,59 @@ impl Home {
 
     /// An action produced by a timer (digit entry), picked up by the event loop.
     pub fn take_action(&mut self) -> Option<Action> {
-        self.pending.take()
+        (!self.pending.is_empty()).then(|| self.pending.remove(0))
+    }
+
+    /// Visibility of Vision's window: a hidden Home stops its preview at once.
+    pub fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+        if !visible {
+            self.dwell = None;
+            if self.preview.take().is_some() {
+                self.pending.push(Action::Preview(None));
+            }
+        }
+    }
+
+    /// Starts the preview once focus rests on a channel with a stream; stops it otherwise.
+    fn update_preview(&mut self) {
+        let wanted = match (self.focused().map(|t| t.kind), &self.tv) {
+            (Some(Kind::Channel { id }), Some(tv))
+                if self.visible && self.prefs.ui.preview && matches!(self.mode, Mode::Browse) && !self.header && tv.streams.contains_key(&id) =>
+            {
+                Some(id)
+            }
+            _ => None,
+        };
+        match wanted {
+            Some(id) if self.preview == Some(id) => {}
+            Some(id) => {
+                if self.preview.take().is_some() {
+                    self.pending.push(Action::Preview(None));
+                }
+                match self.dwell {
+                    Some((d, since)) if d == id => {
+                        if since.elapsed() >= PREVIEW_DWELL {
+                            let stream = self.tv.as_ref().and_then(|tv| tv.streams.get(&id)).cloned();
+                            self.pending.push(Action::Preview(stream));
+                            self.preview = Some(id);
+                        }
+                    }
+                    _ => self.dwell = Some((id, Instant::now())),
+                }
+            }
+            None => {
+                self.dwell = None;
+                if self.preview.take().is_some() {
+                    self.pending.push(Action::Preview(None));
+                }
+            }
+        }
+    }
+
+    /// Whether a timer (preview dwell) needs another frame soon.
+    pub fn waiting(&self) -> bool {
+        self.dwell.is_some_and(|(id, _)| self.preview != Some(id))
     }
 
     pub fn set_catalog(&mut self, entities: Vec<Entity>, selected: Vec<String>) {
@@ -936,8 +1029,20 @@ impl Home {
         let appearance = vec![
             item(SettingId::Ambient, s.ambient_light, s.levels[ui.ambient.min(3) as usize].to_string(), None),
             item(SettingId::Motion, s.motion, if ui.reduced_motion { s.reduced } else { s.full }.to_string(), None),
+            item(SettingId::Preview, s.live_preview, onoff(ui.preview), Some(ui.preview)),
         ];
-        let mut system = vec![item(SettingId::RefreshImages, s.refresh_images, String::new(), None)];
+        let language = match crate::strings::LANGUAGES.iter().find(|(code, _, _)| *code == ui.language) {
+            Some((_, name, _)) => name.to_string(),
+            None => {
+                let system = &self.system_language;
+                let name = crate::strings::LANGUAGES.iter().find(|(c, _, _)| system.starts_with(c)).map_or("English", |(_, n, _)| n);
+                format!("{} ({name})", s.automatic)
+            }
+        };
+        let mut system = vec![
+            item(SettingId::Language, s.language, language, None),
+            item(SettingId::RefreshImages, s.refresh_images, String::new(), None),
+        ];
         let info = |label: &str, value: String| SettingItem { id: SettingId::Info, label: label.to_string(), value, on: None, enabled: false };
         system.push(info(s.launcher, if self.home_mode { "Vision" } else { s.lg_home }.to_string()));
         system.push(info(s.ip_address, self.ip.clone().unwrap_or_else(|| "–".into())));
@@ -1021,6 +1126,18 @@ impl Home {
             SettingId::ShowDate => ui.show_date = !ui.show_date,
             SettingId::Ambient => ui.ambient = (ui.ambient + 1) % 4,
             SettingId::Motion => ui.reduced_motion = !ui.reduced_motion,
+            SettingId::Preview => ui.preview = !ui.preview,
+            SettingId::Language => {
+                // Automatic → English → Deutsch → … → Automatic.
+                let codes: Vec<&str> = std::iter::once("").chain(crate::strings::LANGUAGES.iter().map(|(c, _, _)| *c)).collect();
+                let at = codes.iter().position(|c| *c == ui.language).unwrap_or(0);
+                ui.language = codes[(at + 1) % codes.len()].to_string();
+                let code = if ui.language.is_empty() { self.system_language.clone() } else { ui.language.clone() };
+                crate::strings::set(&code);
+                self.strings = crate::strings::current();
+                self.hero = None;
+                self.refocus(true);
+            }
             SettingId::Row(i) => {
                 let key = ROW_KEYS[i].0.to_string();
                 if let Some(at) = ui.hidden_rows.iter().position(|h| *h == key) {
@@ -1172,7 +1289,7 @@ impl Home {
         let rail = &mut self.rails[self.active];
         let tile = rail.tiles.get_mut(rail.focus)?;
         match tile.kind {
-            Kind::App | Kind::Input { .. } | Kind::Media { .. } | Kind::Channel { .. } | Kind::Reminder { .. } => {
+            Kind::App | Kind::Input { .. } | Kind::Media { .. } | Kind::Channel { .. } | Kind::Reminder { .. } | Kind::Catchup { .. } => {
                 Some(Action::Launch { app_id: tile.launch_id.clone(), params: tile.params.clone() })
             }
             Kind::Entity { on } => {
@@ -1398,7 +1515,7 @@ impl Home {
 
     fn hero_for(&self, tile: &Tile, moving: bool) -> Hero {
         let s = self.strings;
-        if let (Kind::Channel { id } | Kind::Reminder { id, .. }, Some(tv)) = (tile.kind, &self.tv) {
+        if let (Kind::Channel { id } | Kind::Reminder { id, .. } | Kind::Catchup { id, .. }, Some(tv)) = (tile.kind, &self.tv) {
             return self.channel_hero(tile, id, tv);
         }
         let eyebrow = if moving { s.moving.to_uppercase() } else { self.rail_title(self.active).to_uppercase() };
@@ -1416,7 +1533,7 @@ impl Home {
             (Kind::Setting { connected, .. }, _) => {
                 (tile.detail.clone(), Some(if connected { s.press_ok_to_manage } else { s.press_ok_to_connect }))
             }
-            (Kind::Channel { .. } | Kind::Reminder { .. }, _) => (tile.detail.clone(), Some(s.press_ok_to_watch)),
+            (Kind::Channel { .. } | Kind::Reminder { .. } | Kind::Catchup { .. }, _) => (tile.detail.clone(), Some(s.press_ok_to_watch)),
         };
         Hero { eyebrow, title: tile.title.clone(), sub, hint }
     }
@@ -1430,6 +1547,14 @@ impl Home {
         let number = channel.and_then(|c| c.number).map(|n| format!("{n} · ")).unwrap_or_default();
         let (now, next) = tv.now_next(id, now_ms);
         let time = |ms: i64| clock_text(ms);
+        if let Kind::Catchup { start, end, .. } = tile.kind {
+            return Hero {
+                eyebrow: format!("{} · {number}{name}", s.catch_up).to_uppercase(),
+                title: tile.title.clone(),
+                sub: format!("{} · {} – {}", day_label(s, start), time(start), time(end)),
+                hint: Some(s.press_ok_to_watch),
+            };
+        }
         if let Kind::Reminder { start, .. } = tile.kind {
             return Hero {
                 eyebrow: format!("{} · {number}{name}", s.tv_coming).to_uppercase(),
@@ -1483,9 +1608,12 @@ impl Home {
                 moving = true;
             }
         }
+        self.update_preview();
         if let Some((_, last)) = &self.digits {
             if last.elapsed() >= DIGIT_WAIT {
-                self.pending = self.tune_digits();
+                if let Some(action) = self.tune_digits() {
+                    self.pending.push(action);
+                }
             }
             moving = true;
         }
@@ -1528,11 +1656,18 @@ impl Home {
         };
         let s = self.strings;
         let date = if ui.show_date {
-            format!("{}, {} {}", s.days[now.weekday().num_days_from_monday() as usize], now.day(), s.months[now.month0() as usize])
+            s.date(now.weekday().num_days_from_monday() as usize, now.day(), now.month0() as usize)
         } else {
             String::new()
         };
         self.draw_backdrop(r);
+        if self.preview.is_some() {
+            r.punch(PREVIEW_RECT);
+            r.stroke(PREVIEW_RECT.inflate(1.0), 4.0, 1.5, TEXT.alpha(0.25));
+            let pill = Rect::new(PREVIEW_RECT.x + 20.0, PREVIEW_RECT.y + 20.0, 84.0, 36.0);
+            r.rect(pill, 8.0, Rgba::hex(0xE5484D));
+            text.draw(r, &self.strings.live.to_uppercase(), pill.x + 14.0, pill.y + 26.0, INPUT_SUB, Rgba::hex(0xFFFFFF));
+        }
         self.draw_header(r, text, &clock, &date);
         self.draw_hero(r, text);
         self.draw_rails(r, text);
@@ -1585,13 +1720,15 @@ impl Home {
     fn draw_hero(&self, r: &mut Renderer, text: &mut Text) {
         let t = self.hero_t.value.clamp(0.0, 1.0);
         let accent = if self.lift.target > 0.0 { TEXT } else { self.ambient };
+        // With a preview playing, the text keeps clear of the video.
+        let width = if self.preview.is_some() { PREVIEW_RECT.x - SAFE_X - 40.0 } else { 1180.0 };
         if let Some(hero) = &self.previous_hero {
             if t < 1.0 {
-                draw_hero_block(r, text, hero, 1.0 - t, -10.0 * t, accent);
+                draw_hero_block(r, text, hero, 1.0 - t, -10.0 * t, accent, width);
             }
         }
         if let Some(hero) = &self.hero {
-            draw_hero_block(r, text, hero, t, 14.0 * (1.0 - t), accent);
+            draw_hero_block(r, text, hero, t, 14.0 * (1.0 - t), accent, width);
         }
     }
 
@@ -2082,7 +2219,7 @@ fn wrap(text: &mut Text, r: &Renderer, line: &str, style: Style, width: f32) -> 
     lines
 }
 
-fn draw_hero_block(r: &mut Renderer, text: &mut Text, hero: &Hero, alpha: f32, dy: f32, accent: Rgba) {
+fn draw_hero_block(r: &mut Renderer, text: &mut Text, hero: &Hero, alpha: f32, dy: f32, accent: Rgba, width: f32) {
     if alpha <= 0.01 {
         return;
     }
@@ -2093,11 +2230,13 @@ fn draw_hero_block(r: &mut Renderer, text: &mut Text, hero: &Hero, alpha: f32, d
     let style = HERO_SIZES
         .iter()
         .map(|&size| crate::theme::hero(size))
-        .find(|&style| text.measure(r, &hero.title, style) <= 1180.0)
+        .find(|&style| text.measure(r, &hero.title, style) <= width)
         .unwrap_or(crate::theme::hero(HERO_SIZES[HERO_SIZES.len() - 1]));
-    text.draw_top(r, &hero.title, x - 4.0, y, style, TEXT.alpha(alpha));
+    let title = clip(text, r, &hero.title, style, width);
+    text.draw_top(r, &title, x - 4.0, y, style, TEXT.alpha(alpha));
     y += style.size * 1.08 + 18.0;
-    text.draw_top(r, &hero.sub, x, y, HERO_SUB, TEXT.alpha(0.74 * alpha));
+    let sub = clip(text, r, &hero.sub, HERO_SUB, width);
+    text.draw_top(r, &sub, x, y, HERO_SUB, TEXT.alpha(0.74 * alpha));
     if let Some(hint) = hero.hint {
         text.draw_top(r, hint, x, y + 50.0, HINT, TEXT.alpha(0.5 * alpha));
     }
@@ -2215,6 +2354,13 @@ fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: &TileView, 
                 r.rect(Rect::new(track.x, track.y, track.w * progress, 4.0), 2.0, TEXT.alpha(0.9 * alpha));
             }
         }
+        Kind::Catchup { start, end, .. } => {
+            let x = rect.x + 24.0;
+            text.draw_top(r, &format!("{} – {}", clock_text(start), clock_text(end)), x, rect.y + 20.0, INPUT_SUB, TEXT.alpha(0.7 * alpha));
+            let line = clip(text, r, &tile.title, INPUT_LABEL, rect.w - 48.0);
+            text.draw(r, &line, x, rect.y + rect.h - 52.0, INPUT_LABEL, TEXT.alpha(alpha));
+            text.draw(r, &tile.detail, x, rect.y + rect.h - 22.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
+        }
         Kind::Reminder { start, .. } => {
             let x = rect.x + 24.0;
             text.draw_top(r, &clock_text(start), x, rect.y + 18.0, ENTITY_NAME, TEXT.alpha(alpha));
@@ -2263,6 +2409,18 @@ fn entity_state(s: &Strings, e: &Entity) -> String {
             (Some(true), None) => s.on.to_string(),
             _ => s.off.to_string(),
         },
+    }
+}
+
+/// "Today", "Yesterday" or the date, for a UTC timestamp in ms.
+fn day_label(s: &Strings, ms: i64) -> String {
+    use chrono::{Datelike, TimeZone};
+    let Some(then) = chrono::Local.timestamp_millis_opt(ms).single() else { return String::new() };
+    let today = chrono::Local::now().date_naive();
+    match (today - then.date_naive()).num_days() {
+        0 => s.today.to_string(),
+        1 => s.yesterday.to_string(),
+        _ => s.date(then.weekday().num_days_from_monday() as usize, then.day(), then.month0() as usize),
     }
 }
 

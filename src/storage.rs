@@ -40,11 +40,25 @@ pub struct UiPrefs {
     /// Ambient light: 0 off, 1 low, 2 normal, 3 high.
     pub ambient: u8,
     pub reduced_motion: bool,
+    /// Live preview of TV channels in the hero.
+    pub preview: bool,
+    /// UI language code; empty follows the TV.
+    pub language: String,
 }
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { weather: true, fahrenheit: false, clock24: true, show_date: true, hidden_rows: Vec::new(), ambient: 2, reduced_motion: false }
+        Self {
+            weather: true,
+            fahrenheit: false,
+            clock24: true,
+            show_date: true,
+            hidden_rows: Vec::new(),
+            ambient: 2,
+            reduced_motion: false,
+            preview: true,
+            language: String::new(),
+        }
     }
 }
 
@@ -78,6 +92,8 @@ impl Prefs {
                 .unwrap_or_default(),
             ambient: ui.and_then(|u| u.get("ambient")).and_then(Value::as_u64).map_or(defaults.ambient, |a| a.min(3) as u8),
             reduced_motion: flag("reducedMotion", defaults.reduced_motion),
+            preview: flag("preview", defaults.preview),
+            language: ui.and_then(|u| u.get("language")).and_then(Value::as_str).unwrap_or_default().to_string(),
         };
         Self { order: list("order"), hidden: list("hidden"), ui }
     }
@@ -99,6 +115,8 @@ impl Prefs {
                 "hiddenRows": ui.hidden_rows,
                 "ambient": ui.ambient,
                 "reducedMotion": ui.reduced_motion,
+                "preview": ui.preview,
+                "language": ui.language,
             },
         });
         std::fs::write(&temp, serde_json::to_vec_pretty(&body).unwrap_or_default())?;

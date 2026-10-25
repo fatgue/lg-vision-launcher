@@ -92,6 +92,9 @@ pub struct TvFeed {
     pub favorites: Vec<i64>,
     pub recent: Vec<i64>,
     pub reminders: Vec<TvReminder>,
+    pub catchup: Vec<TvCatchup>,
+    /// Live stream per channel for the hero preview (Premium TiviOne only).
+    pub streams: std::collections::HashMap<i64, crate::video::Stream>,
     pub guide: std::collections::HashMap<i64, Vec<Programme>>,
     pub numbers: std::collections::HashMap<u32, i64>,
 }
@@ -107,6 +110,14 @@ pub struct TvReminder {
     pub channel: i64,
     pub title: String,
     pub start: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct TvCatchup {
+    pub channel: i64,
+    pub title: String,
+    pub start: i64,
+    pub end: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +172,29 @@ impl TvFeed {
                 })
                 .unwrap_or_default(),
             guide,
+            catchup: value
+                .get("catchup")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| {
+                            Some(TvCatchup { channel: c.get("id")?.as_i64()?, title: c.get("t")?.as_str()?.to_string(), start: c.get("s")?.as_i64()?, end: c.get("e")?.as_i64()? })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            streams: value
+                .get("streams")
+                .and_then(Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(id, s)| {
+                            let text = |k: &str| s.get(k).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_string);
+                            Some((id.parse().ok()?, crate::video::Stream { url: text("url")?, user_agent: text("ua"), referer: text("ref") }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             numbers: value
                 .get("numbers")
                 .and_then(Value::as_array)
