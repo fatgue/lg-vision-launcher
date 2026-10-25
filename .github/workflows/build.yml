@@ -1,0 +1,70 @@
+name: Build
+
+# Every push to main builds the TV package; a version tag (v1.2.3) also attaches it, with its
+# checksum, to the GitHub release of that tag.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  ipk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabi
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch SDL-webOS
+        run: sh scripts/fetch-deps.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Tag matches appinfo.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(node -p "require('./appinfo.json').version")
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME but appinfo.json says $version"; exit 1; }
+
+      - name: Build and package
+        run: node scripts/package.mjs
+
+      - name: Checksum
+        working-directory: out
+        run: sha256sum *.ipk | tee SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vision-ipk
+          path: |
+            out/*.ipk
+            out/SHA256SUMS
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "Vision ${GITHUB_REF_NAME#v}" --notes "Built from $GITHUB_REF_NAME."
+          gh release upload "$GITHUB_REF_NAME" out/*.ipk out/SHA256SUMS --clobber
