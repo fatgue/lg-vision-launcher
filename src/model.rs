@@ -75,6 +75,8 @@ pub enum Update {
     Weather(Option<Weather>),
     Entities(Vec<Entity>),
     Media(Vec<MediaItem>),
+    /// Every selectable Home Assistant entity, plus the current choice (for the picker).
+    HaCatalog { entities: Vec<Entity>, selected: Vec<String> },
     Status(Status),
     /// TiviOne's snapshot (None: integration off or nothing published yet).
     Tv(Option<TvFeed>),
@@ -183,14 +185,64 @@ pub struct Weather {
     pub code: u32,
 }
 
-/// A Home Assistant entity shown as a tile.
+/// A Home Assistant entity shown as a tile or in the picker.
 #[derive(Clone, Debug)]
 pub struct Entity {
     pub id: String,
     pub name: String,
-    pub domain: String,
+    pub category: HaCategory,
+    /// Area (room) from Home Assistant, empty when unassigned.
+    pub area: String,
+    pub state: String,
     pub on: Option<bool>,
     pub brightness: Option<u8>,
+}
+
+/// Picker and Home-row grouping, in display order. Locks and alarms are deliberately absent:
+/// a stray OK must never unlock a door.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HaCategory {
+    Scenes,
+    Scripts,
+    Groups,
+    Lights,
+    Switches,
+    Toggles,
+    Fans,
+    Covers,
+    Media,
+}
+
+impl HaCategory {
+    pub const ALL: [HaCategory; 9] = [
+        HaCategory::Scenes,
+        HaCategory::Scripts,
+        HaCategory::Groups,
+        HaCategory::Lights,
+        HaCategory::Switches,
+        HaCategory::Toggles,
+        HaCategory::Fans,
+        HaCategory::Covers,
+        HaCategory::Media,
+    ];
+
+    /// Groups are `group.*` plus light and switch groups (entities listing members).
+    pub fn of(domain: &str, attributes: Option<&Value>) -> Option<Self> {
+        let is_group = attributes.and_then(|a| a.get("entity_id")).and_then(Value::as_array).is_some_and(|m| !m.is_empty());
+        Some(match domain {
+            "scene" => Self::Scenes,
+            "script" => Self::Scripts,
+            "group" => Self::Groups,
+            "light" | "switch" if is_group => Self::Groups,
+            "light" => Self::Lights,
+            "switch" => Self::Switches,
+            "input_boolean" => Self::Toggles,
+            "fan" => Self::Fans,
+            "cover" => Self::Covers,
+            "media_player" => Self::Media,
+            _ => return None,
+        })
+    }
 }
 
 /// A Plex "Continue watching" item.
@@ -211,6 +263,8 @@ pub struct Status {
     /// Phone setup address while pairing.
     pub ha_setup: Option<String>,
     pub ha_error: Option<String>,
+    /// How many entities the user chose for the Home row (0: automatic).
+    pub ha_selected: usize,
     /// Connected Plex account.
     pub plex: Option<String>,
     /// plex.tv/link code while linking.
@@ -225,6 +279,8 @@ pub enum ServiceRequest {
     HaSetup(bool),
     HaConfigured { url: String, token: String },
     HaDisconnect,
+    HaCatalog,
+    HaSelect(Vec<String>),
     PlexLink(bool),
     PlexDisconnect,
     TiviOne(bool),

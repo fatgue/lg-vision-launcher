@@ -318,6 +318,7 @@ fn run(started: Instant) -> Result<(), String> {
                 Update::Notice(message) => home.notice(message),
                 Update::Weather(weather) => home.set_weather(weather),
                 Update::Entities(entities) => home.set_entities(entities),
+                Update::HaCatalog { entities, selected } => home.set_catalog(entities, selected),
                 Update::Media(items) => home.set_media(items),
                 Update::Status(status) => home.set_status(status),
                 Update::Tv(feed) => home.set_tv(feed),

@@ -58,6 +58,17 @@ pub struct Strings {
     pub turn_on: &'static str,
     pub not_now: &'static str,
     pub no_channel: &'static str,
+    pub home_tiles: &'static str,
+    pub automatic: &'static str,
+    pub selected: &'static str,
+    pub picker_hint: &'static str,
+    pub loading: &'static str,
+    pub none_here: &'static str,
+    pub open: &'static str,
+    pub closed: &'static str,
+    pub playing: &'static str,
+    pub paused: &'static str,
+    pub categories: [&'static str; 9],
     pub weather: [&'static str; 10],
     pub days: [&'static str; 7],
     pub months: [&'static str; 12],
@@ -142,6 +153,17 @@ pub static EN: Strings = Strings {
     turn_on: "Turn on",
     not_now: "Not now",
     no_channel: "No channel",
+    home_tiles: "Home tiles",
+    automatic: "Automatic",
+    selected: "selected",
+    picker_hint: "OK selects · Back saves",
+    loading: "Loading…",
+    none_here: "Nothing here",
+    open: "Open",
+    closed: "Closed",
+    playing: "Playing",
+    paused: "Paused",
+    categories: ["Scenes", "Scripts", "Groups", "Lights", "Switches", "Helpers", "Fans", "Covers", "Media"],
     weather: ["Clear", "Mainly clear", "Partly cloudy", "Overcast", "Fog", "Drizzle", "Rain", "Snow", "Showers", "Thunderstorm"],
     days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
     months: [
@@ -208,11 +230,21 @@ pub fn charset(strings: &Strings) -> String {
         strings.turn_on,
         strings.not_now,
         strings.no_channel,
+        strings.home_tiles,
+        strings.automatic,
+        strings.selected,
+        strings.picker_hint,
+        strings.loading,
+        strings.none_here,
+        strings.open,
+        strings.closed,
+        strings.playing,
+        strings.paused,
     ] {
         all.push_str(text);
         all.push_str(&text.to_uppercase());
     }
-    for text in strings.days.iter().chain(strings.months.iter()).chain(strings.weather.iter()).chain(strings.ha_setup_steps.iter()) {
+    for text in strings.days.iter().chain(strings.months.iter()).chain(strings.weather.iter()).chain(strings.categories.iter()).chain(strings.ha_setup_steps.iter()) {
         all.push_str(text);
     }
     all

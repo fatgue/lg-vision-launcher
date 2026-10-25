@@ -29,7 +29,7 @@ mounted() { grep -q " $EXE " /proc/mounts; }
 # Ends every process running LG's Home executable (the stock Home or Vision as Home).
 stop_home() {
   for dir in /proc/[0-9]*; do
-    [ "$(tr '\0' '\n' < "$dir/cmdline" 2>/dev/null | head -n 1)" = "$EXE" ] && kill "${dir#/proc/}" 2>/dev/null
+    [ "$( (tr '\0' '\n' < "$dir/cmdline") 2>/dev/null | head -n 1)" = "$EXE" ] && kill "${dir#/proc/}" 2>/dev/null
   done
   sleep 1
 }

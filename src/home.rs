@@ -2,7 +2,8 @@
 use crate::anim::Spring;
 use crate::color::Rgba;
 use crate::gl;
-use crate::model::{App, Entity, Icon, Input, MediaItem, Notice, ServiceRequest, Status, TvFeed, Weather, TIVIONE_APP};
+use crate::model::{App, Entity, HaCategory, Icon, Input, MediaItem, Notice, ServiceRequest, Status, TvFeed, Weather, TIVIONE_APP};
+use std::collections::HashSet;
 use crate::render::{Rect, Renderer, Texture, LOGICAL_H, LOGICAL_W};
 use crate::storage::Prefs;
 use crate::strings::{self, Strings};
@@ -58,6 +59,7 @@ enum Service {
     HomeAssistant,
     Plex,
     TiviOne,
+    HomeTiles,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -187,6 +189,48 @@ enum Mode {
     Setup { service: Service, closing_at: Option<Instant> },
     /// One-time TiviOne offer; `yes` = focus on "Turn on".
     Offer { yes: bool },
+    /// Choosing the Home Assistant entities for the Home row.
+    Picker(Picker),
+}
+
+const PICKER_ROWS: usize = 10;
+
+/// Categories left, entities right; OK ticks, Back saves.
+struct Picker {
+    entities: Vec<Entity>,
+    selected: HashSet<String>,
+    loading: bool,
+    /// 0: categories, 1: entities.
+    column: usize,
+    category: usize,
+    row: usize,
+    top: usize,
+}
+
+impl Picker {
+    fn rows(&self) -> Vec<usize> {
+        let category = HaCategory::ALL[self.category];
+        self.entities.iter().enumerate().filter(|(_, e)| e.category == category).map(|(i, _)| i).collect()
+    }
+
+    fn count(&self, category: HaCategory) -> (usize, usize) {
+        let all = self.entities.iter().filter(|e| e.category == category);
+        let total = all.clone().count();
+        (all.filter(|e| self.selected.contains(&e.id)).count(), total)
+    }
+
+    fn keep_visible(&mut self) {
+        if self.row < self.top {
+            self.top = self.row;
+        } else if self.row >= self.top + PICKER_ROWS {
+            self.top = self.row + 1 - PICKER_ROWS;
+        }
+    }
+
+    /// The choice in display order (category, area, name).
+    fn choice(&self) -> Vec<String> {
+        self.entities.iter().filter(|e| self.selected.contains(&e.id)).map(|e| e.id.clone()).collect()
+    }
 }
 
 /// Something the Magic Remote pointer can hit, recorded while drawing.
@@ -196,6 +240,8 @@ enum Target {
     MenuItem(usize),
     Offer(bool),
     SetupButton,
+    PickerCategory(usize),
+    PickerRow(usize),
 }
 
 struct Hero {
@@ -313,6 +359,22 @@ impl Home {
             }
             (Target::MenuItem(i), Mode::Menu(menu)) => std::mem::replace(&mut menu.focus, i) != i,
             (Target::Offer(yes), Mode::Offer { yes: current }) => std::mem::replace(current, yes) != yes,
+            (Target::PickerCategory(i), Mode::Picker(p)) => {
+                let changed = p.column != 0 || p.category != i;
+                if p.category != i {
+                    p.row = 0;
+                    p.top = 0;
+                }
+                p.column = 0;
+                p.category = i;
+                changed
+            }
+            (Target::PickerRow(i), Mode::Picker(p)) => {
+                let changed = p.column != 1 || p.row != i;
+                p.column = 1;
+                p.row = i;
+                changed
+            }
             _ => false,
         };
         if changed {
@@ -454,16 +516,10 @@ impl Home {
             .into_iter()
             .enumerate()
             .map(|(i, entity)| {
+                let state = entity_state(s, &entity);
+                let detail = if entity.area.is_empty() { state } else { format!("{} · {state}", entity.area) };
                 let mut tile = Tile::new(entity.id, entity.name, Kind::Entity { on: entity.on }, i);
-                tile.detail = match (entity.domain.as_str(), entity.on) {
-                    ("scene", _) => s.scene.to_string(),
-                    ("script", _) => s.script.to_string(),
-                    (_, Some(true)) => match entity.brightness {
-                        Some(b) => format!("{} · {b} %", s.on),
-                        None => s.on.to_string(),
-                    },
-                    _ => s.off.to_string(),
-                };
+                tile.detail = detail;
                 tile.bg = Rgba::hex(0x15171D);
                 tile.accent = if entity.on == Some(true) { Rgba::hex(0xF2C14E) } else { Rgba::hex(0x9AA3B2) };
                 tile
@@ -493,6 +549,13 @@ impl Home {
             setting(Service::HomeAssistant, s.home_assistant, &status.ha, &status.ha_error, 0),
             setting(Service::Plex, s.plex, &status.plex, &status.plex_error, 1),
         ];
+        if status.ha.is_some() {
+            let mut tile = Tile::new("setting:HomeTiles".into(), s.home_tiles.into(), Kind::Setting { service: Service::HomeTiles, connected: true }, tiles.len());
+            tile.detail = if status.ha_selected == 0 { s.automatic.to_string() } else { format!("{} {}", status.ha_selected, s.selected) };
+            tile.bg = Rgba::hex(0x14161C);
+            tile.accent = Rgba::hex(0xF2C14E);
+            tiles.insert(1, tile);
+        }
         if self.apps.iter().any(|a| a.id == TIVIONE_APP) {
             let on = status.tivione == Some(true);
             let mut tile = Tile::new("setting:TiviOne".into(), s.tivione.into(), Kind::Setting { service: Service::TiviOne, connected: on }, 2);
@@ -506,7 +569,7 @@ impl Home {
             let now_connected = match service {
                 Service::HomeAssistant => status.ha.is_some() && self.status.ha.is_none(),
                 Service::Plex => status.plex.is_some() && self.status.plex.is_none(),
-                Service::TiviOne => false,
+                Service::TiviOne | Service::HomeTiles => false,
             };
             if now_connected {
                 *closing_at = Some(Instant::now() + Duration::from_millis(1600));
@@ -589,6 +652,16 @@ impl Home {
     /// An action produced by a timer (digit entry), picked up by the event loop.
     pub fn take_action(&mut self) -> Option<Action> {
         self.pending.take()
+    }
+
+    pub fn set_catalog(&mut self, entities: Vec<Entity>, selected: Vec<String>) {
+        if let Mode::Picker(picker) = &mut self.mode {
+            picker.entities = entities;
+            picker.selected = selected.into_iter().collect();
+            picker.loading = false;
+            // Open on the first category that has something.
+            picker.category = HaCategory::ALL.iter().position(|c| picker.count(*c).1 > 0).unwrap_or(0);
+        }
     }
 
     pub fn set_weather(&mut self, weather: Option<Weather>) {
@@ -703,6 +776,7 @@ impl Home {
             Mode::Move { .. } => self.move_key(key),
             Mode::Setup { .. } => self.setup_key(key),
             Mode::Offer { .. } => self.offer_key(key),
+            Mode::Picker(_) => self.picker_key(key),
             Mode::Browse if matches!(key, Key::Digit(_)) || (self.digits.is_some() && key == Key::Ok) => self.digit_key(key),
             Mode::Browse => self.browse_key(key, home_mode),
         };
@@ -738,6 +812,47 @@ impl Home {
             Key::Back if !home_mode => return Some(Action::Exit),
             _ => {}
         }
+        None
+    }
+
+    fn picker_key(&mut self, key: Key) -> Option<Action> {
+        let Mode::Picker(p) = &mut self.mode else { return None };
+        if key == Key::Back {
+            let choice = p.choice();
+            let loaded = !p.loading;
+            self.mode = Mode::Browse;
+            return loaded.then_some(Action::Service(ServiceRequest::HaSelect(choice)));
+        }
+        if p.loading {
+            return None;
+        }
+        let rows = p.rows();
+        match (key, p.column) {
+            (Key::Up, 0) if p.category > 0 => {
+                p.category -= 1;
+                p.row = 0;
+                p.top = 0;
+            }
+            (Key::Down, 0) if p.category + 1 < HaCategory::ALL.len() => {
+                p.category += 1;
+                p.row = 0;
+                p.top = 0;
+            }
+            (Key::Right | Key::Ok, 0) if !rows.is_empty() => p.column = 1,
+            (Key::Left, 1) => p.column = 0,
+            (Key::Up, 1) if p.row > 0 => p.row -= 1,
+            (Key::Down, 1) if p.row + 1 < rows.len() => p.row += 1,
+            (Key::Ok, 1) => {
+                if let Some(&index) = rows.get(p.row) {
+                    let id = p.entities[index].id.clone();
+                    if !p.selected.remove(&id) {
+                        p.selected.insert(id);
+                    }
+                }
+            }
+            _ => {}
+        }
+        p.keep_visible();
         None
     }
 
@@ -810,6 +925,18 @@ impl Home {
                 Some(Action::Service(ServiceRequest::HaAction(tile.id.clone())))
             }
             Kind::Setting { service: Service::TiviOne, connected } => Some(Action::Service(ServiceRequest::TiviOne(!connected))),
+            Kind::Setting { service: Service::HomeTiles, .. } => {
+                self.mode = Mode::Picker(Picker {
+                    entities: Vec::new(),
+                    selected: HashSet::new(),
+                    loading: true,
+                    column: 0,
+                    category: 0,
+                    row: 0,
+                    top: 0,
+                });
+                Some(Action::Service(ServiceRequest::HaCatalog))
+            }
             Kind::Setting { service, connected } => {
                 self.mode = Mode::Setup { service, closing_at: None };
                 match (service, connected) {
@@ -826,7 +953,7 @@ impl Home {
         let connected = match service {
             Service::HomeAssistant => self.status.ha.is_some(),
             Service::Plex => self.status.plex.is_some(),
-            Service::TiviOne => false,
+            Service::TiviOne | Service::HomeTiles => false,
         };
         match key {
             Key::Back => {
@@ -949,7 +1076,7 @@ impl Home {
 
     fn refocus(&mut self, instant: bool) {
         let moving = matches!(self.mode, Mode::Move { .. });
-        let overlay = matches!(self.mode, Mode::Menu(_) | Mode::Setup { .. } | Mode::Offer { .. });
+        let overlay = matches!(self.mode, Mode::Menu(_) | Mode::Setup { .. } | Mode::Offer { .. } | Mode::Picker(_));
         let active = self.active;
         for (r, rail) in self.rails.iter_mut().enumerate() {
             for (i, tile) in rail.tiles.iter_mut().enumerate() {
@@ -1006,6 +1133,7 @@ impl Home {
             (Kind::Entity { on: None }, _) => (tile.detail.clone(), Some(s.press_ok_to_activate)),
             (Kind::Entity { .. }, _) => (tile.detail.clone(), Some(s.press_ok_to_toggle)),
             (Kind::Setting { service: Service::TiviOne, .. }, _) => (tile.detail.clone(), Some(s.press_ok_to_toggle)),
+            (Kind::Setting { service: Service::HomeTiles, .. }, _) => (tile.detail.clone(), Some(s.press_ok_to_manage)),
             (Kind::Setting { connected, .. }, _) => {
                 (tile.detail.clone(), Some(if connected { s.press_ok_to_manage } else { s.press_ok_to_connect }))
             }
@@ -1112,6 +1240,7 @@ impl Home {
         self.draw_menu(r, text);
         self.draw_setup(r, text);
         self.draw_offer(r, text);
+        self.draw_picker(r, text);
         self.draw_digits(r, text);
         self.draw_notice(r, text);
     }
@@ -1295,7 +1424,7 @@ impl Home {
                     }
                 }
             }
-            Service::Plex | Service::TiviOne => {
+            Service::Plex | Service::TiviOne | Service::HomeTiles => {
                 if let Some(account) = &self.status.plex {
                     text.draw_top(r, s.plex, x, y, SETUP_TITLE, a(1.0));
                     y += 90.0;
@@ -1358,6 +1487,95 @@ impl Home {
             }
             text.draw(r, label, bx + 36.0, by + 42.0, MENU_ITEM, if focused { BG } else { TEXT }.alpha(open));
             bx += w + 20.0;
+        }
+    }
+
+    fn draw_picker(&self, r: &mut Renderer, text: &mut Text) {
+        let open = self.overlay.value.clamp(0.0, 1.0);
+        let Mode::Picker(p) = &self.mode else { return };
+        if open <= 0.01 {
+            return;
+        }
+        let s = self.strings;
+        let a = |v: f32| TEXT.alpha(v * open);
+        r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(0.82 * open));
+        let panel = Rect::new(150.0, 90.0 + 16.0 * (1.0 - open), 1620.0, 900.0);
+        draw_panel(r, panel, open);
+        let (x, y) = (panel.x + 56.0, panel.y + 48.0);
+        text.draw_top(r, s.home_tiles, x, y, SETUP_TITLE, a(1.0));
+        let hint_w = text.measure(r, s.picker_hint, SETUP_SMALL);
+        text.draw_top(r, s.picker_hint, panel.x + panel.w - 56.0 - hint_w, y + 22.0, SETUP_SMALL, a(0.5));
+        let top = panel.y + 150.0;
+        if p.loading {
+            text.draw_top(r, s.loading, x, top, SETUP_BODY, a(0.6));
+            return;
+        }
+
+        // Categories.
+        let (cat_w, row_h) = (400.0, 66.0);
+        for (i, category) in HaCategory::ALL.iter().enumerate() {
+            let row = Rect::new(x - 16.0, top + i as f32 * row_h, cat_w, row_h - 8.0);
+            self.hits.borrow_mut().push((row, Target::PickerCategory(i)));
+            let current = i == p.category;
+            let focused = current && p.column == 0;
+            if focused {
+                r.rect(row, 14.0, TEXT.alpha(open));
+            } else if current {
+                r.rect(row, 14.0, TEXT.alpha(0.08 * open));
+            }
+            let color = if focused { BG } else { TEXT };
+            let (chosen, total) = p.count(*category);
+            text.draw(r, s.categories[i], row.x + 20.0, row.y + 40.0, MENU_ITEM, color.alpha(open * if total == 0 { 0.4 } else { 1.0 }));
+            let count = format!("{chosen}/{total}");
+            let w = text.measure(r, &count, INPUT_SUB);
+            text.draw(r, &count, row.x + row.w - 20.0 - w, row.y + 38.0, INPUT_SUB, color.alpha(0.6 * open));
+        }
+
+        // Entities of the current category.
+        let list_x = x + cat_w + 40.0;
+        let list_w = panel.x + panel.w - 56.0 - list_x;
+        let rows = p.rows();
+        if rows.is_empty() {
+            text.draw_top(r, s.none_here, list_x, top + 12.0, SETUP_BODY, a(0.5));
+            return;
+        }
+        for (slot, &index) in rows.iter().enumerate().skip(p.top).take(PICKER_ROWS) {
+            let entity = &p.entities[index];
+            let row = Rect::new(list_x, top + (slot - p.top) as f32 * row_h, list_w, row_h - 8.0);
+            self.hits.borrow_mut().push((row, Target::PickerRow(slot)));
+            let focused = p.column == 1 && slot == p.row;
+            if focused {
+                r.rect(row, 14.0, TEXT.alpha(open));
+            }
+            let color = if focused { BG } else { TEXT };
+            // Checkbox: filled with a centre mark when chosen.
+            let tick = Rect::new(row.x + 20.0, row.y + (row.h - 28.0) * 0.5, 28.0, 28.0);
+            if p.selected.contains(&entity.id) {
+                r.rect(tick, 7.0, Rgba::hex(0xF2C14E).alpha(open));
+                r.rect(tick.inflate(-8.0), 3.0, Rgba::hex(0x07080B).alpha(open));
+            } else {
+                r.stroke(tick, 7.0, 2.0, color.alpha(0.6 * open));
+            }
+            let name_x = tick.x + tick.w + 22.0;
+            let state = entity_state(s, entity);
+            let state_w = text.measure(r, &state, INPUT_SUB);
+            let area_w = if entity.area.is_empty() { 0.0 } else { text.measure(r, &entity.area, INPUT_SUB) + 32.0 };
+            let name = clip(text, r, &entity.name, MENU_ITEM, row.x + row.w - 24.0 - state_w - 32.0 - area_w - name_x);
+            text.draw(r, &name, name_x, row.y + 40.0, MENU_ITEM, color.alpha(open));
+            let mut right = row.x + row.w - 24.0;
+            text.draw(r, &state, right - state_w, row.y + 38.0, INPUT_SUB, color.alpha(0.55 * open));
+            right -= state_w + 32.0;
+            if !entity.area.is_empty() {
+                text.draw(r, &entity.area, right - (area_w - 32.0), row.y + 38.0, INPUT_SUB, color.alpha(0.75 * open));
+            }
+        }
+        // Scroll hint: how far down the list we are.
+        if rows.len() > PICKER_ROWS {
+            let track = Rect::new(panel.x + panel.w - 30.0, top, 4.0, PICKER_ROWS as f32 * row_h - 8.0);
+            r.rect(track, 2.0, TEXT.alpha(0.1 * open));
+            let h = track.h * PICKER_ROWS as f32 / rows.len() as f32;
+            let y = track.y + (track.h - h) * p.top as f32 / (rows.len() - PICKER_ROWS) as f32;
+            r.rect(Rect::new(track.x, y, 4.0, h), 2.0, TEXT.alpha(0.5 * open));
         }
     }
 
@@ -1603,6 +1821,30 @@ fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: &TileView, 
             text.draw(r, &tile.title, x, rect.y + rect.h * 0.5 - 2.0, style, TEXT.alpha(alpha));
             text.draw(r, &tile.detail, x, rect.y + rect.h * 0.5 + 26.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
         }
+    }
+}
+
+/// "On · 40 %", "Open", "Playing", "Scene" … for an entity.
+fn entity_state(s: &Strings, e: &Entity) -> String {
+    match e.category {
+        HaCategory::Scenes => s.scene.to_string(),
+        HaCategory::Scripts => s.script.to_string(),
+        HaCategory::Covers => match e.state.as_str() {
+            "open" | "opening" => s.open.to_string(),
+            "closed" | "closing" => s.closed.to_string(),
+            other => other.to_string(),
+        },
+        HaCategory::Media => match e.state.as_str() {
+            "playing" => s.playing.to_string(),
+            "paused" => s.paused.to_string(),
+            "off" | "standby" => s.off.to_string(),
+            other => other.to_string(),
+        },
+        _ => match (e.on, e.brightness) {
+            (Some(true), Some(b)) => format!("{} · {b} %", s.on),
+            (Some(true), None) => s.on.to_string(),
+            _ => s.off.to_string(),
+        },
     }
 }
 

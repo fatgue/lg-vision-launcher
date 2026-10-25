@@ -6,6 +6,8 @@ use std::path::Path;
 pub struct Config {
     pub ha_url: Option<String>,
     pub ha_token: Option<String>,
+    /// Home Assistant entities chosen for the Home row, in display order (empty: automatic).
+    pub ha_entities: Vec<String>,
     pub plex_client_id: String,
     pub plex_token: Option<String>,
     pub plex_user: Option<String>,
@@ -29,6 +31,11 @@ impl Config {
         let mut config = Self {
             ha_url: text("haUrl"),
             ha_token: text("haToken"),
+            ha_entities: value
+                .get("haEntities")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default(),
             plex_client_id: text("plexClientId").unwrap_or_default(),
             plex_token: text("plexToken"),
             plex_user: text("plexUser"),
@@ -54,6 +61,7 @@ impl Config {
             "version": 1,
             "haUrl": self.ha_url,
             "haToken": self.ha_token,
+            "haEntities": self.ha_entities,
             "plexClientId": self.plex_client_id,
             "plexToken": self.plex_token,
             "plexUser": self.plex_user,

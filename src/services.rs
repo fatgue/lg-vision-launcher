@@ -3,7 +3,8 @@
 use crate::companion::{self, Companion};
 use crate::config::Config;
 use crate::log::log;
-use crate::model::{self, Entity, MediaItem, ServiceRequest, Status, TvFeed, Update, Weather};
+use crate::model::{self, Entity, HaCategory, MediaItem, ServiceRequest, Status, TvFeed, Update, Weather};
+use std::collections::HashMap;
 use base64::Engine;
 use crate::net;
 use crate::platform::Sink;
@@ -17,6 +18,9 @@ const WEATHER_EVERY: Duration = Duration::from_secs(15 * 60);
 const HA_EVERY: Duration = Duration::from_secs(60);
 const PLEX_EVERY: Duration = Duration::from_secs(5 * 60);
 const PIN_POLL: Duration = Duration::from_secs(2);
+const AREAS_EVERY: Duration = Duration::from_secs(10 * 60);
+/// Area of every selectable entity in one round trip (the REST states carry no areas).
+const AREA_TEMPLATE: &str = "{% set ns = namespace(o=[]) %}{% for s in states if s.domain in ['light','switch','scene','script','group','fan','cover','media_player','input_boolean'] %}{% set ns.o = ns.o + [[s.entity_id, area_name(s.entity_id) or '']] %}{% endfor %}{{ ns.o | tojson }}";
 const PLEX_TV: &str = "https://plex.tv/api/v2";
 const TV_EVERY: Duration = Duration::from_secs(20);
 /// Where the TiviOne service drops the sealed snapshot (shared /tmp of both jails).
@@ -57,6 +61,8 @@ struct Worker {
     visible: bool,
     status: Status,
     ha_location: Option<(f64, f64)>,
+    areas: HashMap<String, String>,
+    areas_at: Option<Instant>,
     next_weather: Instant,
     next_ha: Instant,
     next_plex: Instant,
@@ -73,6 +79,7 @@ impl Worker {
         let now = Instant::now();
         let status = Status {
             ha: config.ha_url.clone().filter(|_| config.ha_token.is_some()),
+            ha_selected: config.ha_entities.len(),
             plex: config.plex_token.as_ref().map(|_| config.plex_user.clone().unwrap_or_else(|| "Plex".into())),
             tivione: config.tivione,
             ..Status::default()
@@ -86,6 +93,8 @@ impl Worker {
             visible: true,
             status,
             ha_location: None,
+            areas: HashMap::new(),
+            areas_at: None,
             next_weather: now,
             next_ha: now,
             next_plex: now,
@@ -184,6 +193,20 @@ impl Worker {
                 self.ha_location = None;
                 self.next_ha = now;
                 self.next_weather = now;
+            }
+            ServiceRequest::HaCatalog => {
+                self.areas_at = None;
+                match self.ha_entities() {
+                    Ok(all) => self.sink.send(Update::HaCatalog { entities: all, selected: self.config.ha_entities.clone() }),
+                    Err(error) => log!("home assistant catalog: {error}"),
+                }
+            }
+            ServiceRequest::HaSelect(selected) => {
+                self.config.ha_entities = selected;
+                self.save();
+                self.status.ha_selected = self.config.ha_entities.len();
+                self.publish_status();
+                self.next_ha = now;
             }
             ServiceRequest::HaDisconnect => {
                 self.config.ha_url = None;
@@ -331,12 +354,12 @@ impl Worker {
                 }
             }
         }
-        match self.ha_get("/api/states") {
-            Ok(states) => {
+        match self.ha_entities() {
+            Ok(all) => {
                 if self.status.ha_error.take().is_some() {
                     self.publish_status();
                 }
-                self.sink.send(Update::Entities(entities_from_states(&states)));
+                self.sink.send(Update::Entities(choose(all, &self.config.ha_entities)));
             }
             Err(error) => {
                 log!("home assistant: {error}");
@@ -349,12 +372,36 @@ impl Worker {
         }
     }
 
+    /// Every selectable entity with its area, sorted by category, area and name.
+    fn ha_entities(&mut self) -> Result<Vec<Entity>, String> {
+        if self.areas_at.is_none_or(|t| t.elapsed() > AREAS_EVERY) {
+            if let Some((url, token)) = self.config.ha() {
+                let auth = format!("Bearer {token}");
+                match net::post_json(&self.agent, &format!("{url}/api/template"), &[("Authorization", &auth)], Some(&json!({ "template": AREA_TEMPLATE }))) {
+                    Ok(Value::Array(pairs)) => {
+                        self.areas = pairs
+                            .iter()
+                            .filter_map(|p| Some((p.get(0)?.as_str()?.to_string(), p.get(1)?.as_str()?.to_string())))
+                            .collect();
+                        self.areas_at = Some(Instant::now());
+                    }
+                    Ok(_) => self.areas_at = Some(Instant::now()),
+                    Err(error) => log!("home assistant areas: {error}"),
+                }
+            }
+        }
+        let states = self.ha_get("/api/states")?;
+        Ok(entities_from_states(&states, &self.areas))
+    }
+
     fn ha_action(&mut self, entity: &str) {
         let Some((url, token)) = self.config.ha() else { return };
         let domain = entity.split('.').next().unwrap_or_default();
-        let service = match domain {
-            "scene" | "script" => "turn_on",
-            _ => "toggle",
+        // Scenes and scripts run; media players play/pause; everything else toggles.
+        let (domain, service) = match domain {
+            "scene" | "script" => (domain, "turn_on"),
+            "media_player" => (domain, "media_play_pause"),
+            _ => ("homeassistant", "toggle"),
         };
         let auth = format!("Bearer {token}");
         let endpoint = format!("{url}/api/services/{domain}/{service}");
@@ -568,8 +615,8 @@ impl Worker {
     }
 }
 
-/// Default selection: scenes, scripts and lights (up to 16), scenes first.
-fn entities_from_states(states: &Value) -> Vec<Entity> {
+/// All selectable entities (unavailable ones left out), by category, area and name.
+fn entities_from_states(states: &Value, areas: &HashMap<String, String>) -> Vec<Entity> {
     let mut entities: Vec<Entity> = states
         .as_array()
         .map(|states| {
@@ -578,37 +625,47 @@ fn entities_from_states(states: &Value) -> Vec<Entity> {
                 .filter_map(|state| {
                     let id = state.get("entity_id")?.as_str()?.to_string();
                     let domain = id.split('.').next()?.to_string();
-                    if !matches!(domain.as_str(), "scene" | "script" | "light") {
-                        return None;
-                    }
                     let attributes = state.get("attributes");
-                    let name = attributes
-                        .and_then(|a| a.get("friendly_name"))
-                        .and_then(Value::as_str)
-                        .unwrap_or(&id)
-                        .to_string();
-                    let value = state.get("state").and_then(Value::as_str).unwrap_or("");
+                    let category = HaCategory::of(&domain, attributes)?;
+                    let value = state.get("state").and_then(Value::as_str).unwrap_or("").to_string();
                     if value == "unavailable" {
                         return None;
                     }
-                    let on = (domain == "light").then(|| value == "on");
+                    let name = attributes.and_then(|a| a.get("friendly_name")).and_then(Value::as_str).unwrap_or(&id).to_string();
+                    let on = match category {
+                        HaCategory::Scenes | HaCategory::Scripts | HaCategory::Media | HaCategory::Covers => None,
+                        _ => Some(value == "on"),
+                    };
                     let brightness = attributes
                         .and_then(|a| a.get("brightness"))
                         .and_then(Value::as_u64)
                         .map(|b| ((b as f32 / 255.0) * 100.0).round() as u8);
-                    Some(Entity { id, name, domain, on, brightness })
+                    Some(Entity { area: areas.get(&id).cloned().unwrap_or_default(), id, name, category, state: value, on, brightness })
                 })
                 .collect()
         })
         .unwrap_or_default();
-    let rank = |d: &str| match d {
-        "scene" => 0,
-        "script" => 1,
-        _ => 2,
-    };
-    entities.sort_by(|a, b| rank(&a.domain).cmp(&rank(&b.domain)).then_with(|| a.name.cmp(&b.name)));
-    entities.truncate(16);
+    entities.sort_by(|a, b| {
+        a.category
+            .cmp(&b.category)
+            .then_with(|| a.area.is_empty().cmp(&b.area.is_empty()))
+            .then_with(|| a.area.cmp(&b.area))
+            .then_with(|| a.name.cmp(&b.name))
+    });
     entities
+}
+
+/// The Home row: the user's choice in the picker's order; until then a small automatic set
+/// (scenes, scripts and groups).
+fn choose(all: Vec<Entity>, selected: &[String]) -> Vec<Entity> {
+    if selected.is_empty() {
+        return all
+            .into_iter()
+            .filter(|e| matches!(e.category, HaCategory::Scenes | HaCategory::Scripts | HaCategory::Groups))
+            .take(12)
+            .collect();
+    }
+    all.into_iter().filter(|e| selected.contains(&e.id)).collect()
 }
 
 fn media_item(item: &Value) -> Option<MediaItem> {
