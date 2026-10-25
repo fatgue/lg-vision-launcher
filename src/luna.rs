@@ -37,6 +37,7 @@ dynamic_api! {
     pub struct Glib {
         fn context_new = "g_main_context_new": fn() -> *mut c_void;
         fn context_iteration = "g_main_context_iteration": fn(*mut c_void, c_int) -> c_int;
+        fn context_wakeup = "g_main_context_wakeup": fn(*mut c_void);
     }
 }
 
@@ -183,16 +184,45 @@ extern "C" fn on_message(_handle: *mut c_void, message: *mut c_void, userdata: *
     true
 }
 
+struct Request {
+    uri: String,
+    payload: Value,
+    reply: std::sync::mpsc::Sender<Result<Value, String>>,
+}
+
+/// Calls made on the subscription's connection from other threads. As Home, LG's LS2 role
+/// allows a single service name, and only that name may reach services such as the media
+/// server, so everything that needs it shares the one connection.
+#[derive(Clone)]
+pub struct Remote {
+    tx: std::sync::mpsc::Sender<Request>,
+    context: usize,
+    wakeup: unsafe extern "C" fn(*mut c_void),
+}
+
+impl Remote {
+    pub fn call(&self, uri: &str, payload: &Value) -> Result<Value, String> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.tx
+            .send(Request { uri: uri.to_string(), payload: payload.clone(), reply })
+            .map_err(|_| "luna connection closed".to_string())?;
+        // SAFETY: waking a GLib context is thread-safe; the context lives as long as the process.
+        unsafe { (self.wakeup)(self.context as *mut c_void) };
+        answer.recv_timeout(Duration::from_secs(10)).map_err(|_| format!("{uri}: no answer"))?
+    }
+}
+
 /// Holds a subscription on its own connection and thread for the life of the process
 /// (SAM's registerApp: the lifecycle of Vision as Home).
-pub fn subscribe(name: Option<&'static str>, uri: &str, payload: &Value, sink: Sink) -> Result<(), String> {
+pub fn subscribe(name: Option<&'static str>, uri: &str, payload: &Value, sink: Sink) -> Result<Remote, String> {
     let uri = CString::new(uri).map_err(|_| "bad uri")?;
     let payload = CString::new(payload.to_string()).map_err(|_| "bad payload")?;
-    let (started, handshake) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    let (started, handshake) = std::sync::mpsc::sync_channel::<Result<Remote, String>>(1);
+    let (tx, requests) = std::sync::mpsc::channel::<Request>();
     std::thread::Builder::new()
         .name("luna-subscription".into())
         .spawn(move || {
-            let luna = match Luna::connect_named(name) {
+            let mut luna = match Luna::connect_named(name) {
                 Ok(luna) => luna,
                 Err(error) => return drop(started.send(Err(error))),
             };
@@ -204,10 +234,13 @@ pub fn subscribe(name: Option<&'static str>, uri: &str, payload: &Value, sink: S
             if !ok {
                 return drop(started.send(Err(luna.ls.describe(error, "subscription"))));
             }
-            let _ = started.send(Ok(()));
+            let _ = started.send(Ok(Remote { tx, context: luna.context as usize, wakeup: luna.glib.context_wakeup }));
             loop {
                 // SAFETY: only this thread drives this connection's context.
                 unsafe { (luna.glib.context_iteration)(luna.context, 1) };
+                while let Ok(request) = requests.try_recv() {
+                    let _ = request.reply.send(luna.call(&request.uri, &request.payload));
+                }
             }
         })
         .map_err(|e| e.to_string())?;

@@ -161,14 +161,24 @@ fn run(started: Instant) -> Result<(), String> {
     log!("glyphs: {} prewarmed, waited {} ms", text.glyph_count(), glyph_wait.elapsed().as_millis());
     let mut home = Home::new(&renderer, prefs);
     home.set_home_mode(home_mode);
-    if home_mode {
-        register_home(sdl.waker())?;
+    let bus = if home_mode {
+        let bus = register_home(sdl.waker())?;
         log!("running as Home");
-    }
+        bus
+    } else {
+        None
+    };
     let platform = Platform::start(sdl.waker(), data_dir.clone());
     platform.send(Request::Refresh);
     let services = Services::start(platform.sink(), data_dir.clone());
-    let preview = video::Video::start(&sdl_candidates(&exe_dir), home::PREVIEW_RECT, if home_mode { HOME_ID } else { APP_ID }, &data_dir);
+    let preview = video::Video::start(
+        &sdl_candidates(&exe_dir),
+        window,
+        home::PREVIEW_RECT,
+        if home_mode { HOME_ID } else { APP_ID },
+        &data_dir,
+        bus,
+    );
     let io = Io { platform: &platform, services: &services, home_mode, video: &preview };
     log!("init: {} ms", started.elapsed().as_millis());
 
@@ -447,7 +457,8 @@ fn dispatch(action: Action, io: &Io) -> bool {
 
 /// Registers with SAM as LG's Home (lifecycle v2): "relaunch" on the Home key, "close" to exit.
 #[cfg(all(target_os = "linux", target_arch = "arm"))]
-fn register_home(waker: sdl::Waker) -> Result<(), String> {
+/// Returns the registration's connection: as Home it is the only LS2 name Vision may use.
+fn register_home(waker: sdl::Waker) -> Result<Option<video::Bus>, String> {
     let sink = Box::new(move |message: serde_json::Value| {
         log!("lifecycle: {message}");
         let event = message.get("event").or_else(|| message.get("message")).and_then(|v| v.as_str());
@@ -459,12 +470,12 @@ fn register_home(waker: sdl::Waker) -> Result<(), String> {
             _ => {}
         }
     });
-    luna::subscribe(Some(HOME_ID), "luna://com.webos.applicationManager/registerApp", &serde_json::json!({ "id": HOME_ID }), sink)
+    luna::subscribe(Some(HOME_ID), "luna://com.webos.applicationManager/registerApp", &serde_json::json!({ "id": HOME_ID }), sink).map(Some)
 }
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
-fn register_home(_waker: sdl::Waker) -> Result<(), String> {
-    Ok(())
+fn register_home(_waker: sdl::Waker) -> Result<Option<video::Bus>, String> {
+    Ok(None)
 }
 
 /// Brings the Home instance forward (used when Vision's own tile is opened while it is Home).
