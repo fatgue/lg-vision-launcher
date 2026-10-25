@@ -28,7 +28,7 @@ Performance comes first. Measured on the CX (Mali-G51):
 
 | Metric | Value |
 |---|---|
-| Cold start to first frame | ~400 ms |
+| Cold start to first frame | ~250 ms (~430 ms on the first start after an update) |
 | Home key to Vision (already running) | ~50 ms |
 | CPU work per frame while navigating | ~1 ms (max ~4 ms) |
 | Frame rate | 50 fps (the TV's UI refresh), steady |
@@ -39,7 +39,7 @@ How it stays fast:
 
 - **Render on demand:** the UI thread sleeps until a key, new data, the next minute or a running animation wakes it.
 - **One shader for everything:** rounded rects, soft shadows, glows and strokes are analytic SDFs. No offscreen passes, no real-time blur.
-- **Batched drawing** from texture atlases; glyphs are rasterised on a background thread while SDL and GL start.
+- **Batched drawing** from texture atlases. Glyphs are rasterised once on a background thread; the packed atlas is kept on disk and read back on later starts.
 - **Nothing blocks the UI thread:** Luna calls, network requests, file access and image decoding run on workers.
 - **Nothing is linked at build time:** SDL, GLES, libluna-service2 and GLib are loaded with `dlopen`.
 
@@ -130,6 +130,10 @@ node scripts/tv.mjs shot        # capture the UI plane to out/tv.jpg
 ```
 
 Set the TV with `VISION_TV_HOST` and `VISION_TV_PASSWORD`.
+
+**Releases:** bump the version in `Cargo.toml` and `appinfo.json`, then push a tag `vX.Y.Z`. GitHub Actions
+(`.github/workflows/build.yml`) builds the package from that tag and attaches it, with `SHA256SUMS`, to the release.
+Every push to `main` builds it too (download it from the workflow run).
 
 ```
 src/main.rs       event loop, window and GL context, frame timing
