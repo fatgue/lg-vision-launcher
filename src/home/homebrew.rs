@@ -27,8 +27,9 @@ pub(super) struct Brew {
     /// The app shown in the detail panel.
     detail: Option<String>,
     button: usize,
-    /// Uninstall was pressed once; the next press confirms.
-    confirm: bool,
+    /// Presses so far on a button that asks first: Uninstall asks once; installing or updating
+    /// an app with root rights warns and asks twice.
+    confirm: u8,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -42,7 +43,7 @@ enum BrewButton {
 
 impl Home {
     pub(super) fn open_homebrew(&mut self) -> Option<Action> {
-        self.mode = Mode::Homebrew(Brew { tab: 0, row: 1, focus: 0, detail: None, button: 0, confirm: false });
+        self.mode = Mode::Homebrew(Brew { tab: 0, row: 1, focus: 0, detail: None, button: 0, confirm: 0 });
         self.brew_scroll = Spring::new(0.0, 16.0);
         // Loaded once per start (and again after a failure).
         match &self.brew {
@@ -84,7 +85,7 @@ impl Home {
                 let message = if installed { s.brew_removed } else { s.brew_done };
                 self.notice = Some((format!("{message}: {title}"), Instant::now()));
                 if let Mode::Homebrew(brew) = &mut self.mode {
-                    brew.confirm = false;
+                    brew.confirm = 0;
                     brew.button = 0;
                 }
                 // The new app list brings the new state.
@@ -113,7 +114,7 @@ impl Home {
                 let installed = self.versions.get(&apps[i].id);
                 match tab {
                     1 => installed.is_some(),
-                    2 => installed.is_some_and(|v| version_newer(&apps[i].package.version, v)),
+                    2 => apps[i].unsupported.is_none() && installed.is_some_and(|v| version_newer(&apps[i].package.version, v)),
                     _ => true,
                 }
             })
@@ -128,6 +129,9 @@ impl Home {
         }
         let failed = matches!(self.brew_progress.get(&app.id), Some(InstallState::Failed(_)));
         match self.versions.get(&app.id) {
+            // Too old a webOS: nothing to install or update.
+            None if app.unsupported.is_some() => {}
+            Some(_) if app.unsupported.is_some() => buttons.push(BrewButton::Open),
             None => buttons.push(if failed { BrewButton::Retry } else { BrewButton::Install }),
             Some(v) if version_newer(&app.package.version, v) => buttons.push(if failed { BrewButton::Retry } else { BrewButton::Update }),
             Some(_) => buttons.push(BrewButton::Open),
@@ -151,18 +155,20 @@ impl Home {
             match key {
                 Key::Left if button > 0 => {
                     brew.button -= 1;
-                    brew.confirm = false;
+                    brew.confirm = 0;
                 }
                 Key::Right if button + 1 < buttons.len() => {
                     brew.button += 1;
-                    brew.confirm = false;
+                    brew.confirm = 0;
                 }
                 Key::Back => {
                     brew.detail = None;
-                    brew.confirm = false;
+                    brew.confirm = 0;
                 }
                 Key::Ok => match buttons.get(button.min(buttons.len().saturating_sub(1))) {
+                    Some(BrewButton::Install | BrewButton::Update | BrewButton::Retry) if app.root && confirm < 2 => brew.confirm += 1,
                     Some(BrewButton::Install | BrewButton::Update | BrewButton::Retry) => {
+                        brew.confirm = 0;
                         self.brew_progress.insert(app.id.clone(), InstallState::Downloading(0.0));
                         return Some(Action::HomebrewInstall(app.package.clone()));
                     }
@@ -170,12 +176,12 @@ impl Home {
                         self.mode = Mode::Browse;
                         return Some(Action::Launch { app_id: app.id.clone(), params: None });
                     }
-                    Some(BrewButton::Uninstall) if confirm => {
-                        brew.confirm = false;
+                    Some(BrewButton::Uninstall) if confirm > 0 => {
+                        brew.confirm = 0;
                         self.brew_progress.insert(app.id.clone(), InstallState::Removing);
                         return Some(Action::HomebrewRemove(app.id.clone()));
                     }
-                    Some(BrewButton::Uninstall) => brew.confirm = true,
+                    Some(BrewButton::Uninstall) => brew.confirm = 1,
                     None => {}
                 },
                 _ => {}
@@ -215,7 +221,7 @@ impl Home {
                     if let Mode::Homebrew(brew) = &mut self.mode {
                         brew.detail = id;
                         brew.button = 0;
-                        brew.confirm = false;
+                        brew.confirm = 0;
                     }
                 }
             }
@@ -254,7 +260,12 @@ impl Home {
                 brew.row = 1;
                 brew.focus = i;
             }
-            Target::BrewButton(i) if brew.detail.is_some() => brew.button = i,
+            Target::BrewButton(i) if brew.detail.is_some() => {
+                if brew.button != i {
+                    brew.confirm = 0;
+                }
+                brew.button = i;
+            }
             _ => {}
         }
         before != (brew.tab, brew.row, brew.focus, brew.button)
@@ -319,6 +330,8 @@ impl Home {
                 }
                 let focused = brew.row == 1 && slot == brew.focus && brew.detail.is_none();
                 let card = if focused { base.scale_about(1.04, 0.5, 0.5) } else { base };
+                // Not for this TV: greyed out.
+                let dim = if app.unsupported.is_some() { 0.4 } else { 1.0 };
                 let icon = Rect::new(card.x + 24.0, card.y + (card.h - ICON) * 0.5, ICON, ICON);
                 match pass {
                     0 => {
@@ -336,24 +349,34 @@ impl Home {
                     }
                     1 => {
                         if let (Some(atlas), Some(uv)) = (self.brew_atlas, self.brew_icons.get(&app.id)) {
-                            r.image(atlas, icon, *uv, 22.0, a(1.0));
+                            r.image(atlas, icon, *uv, 22.0, a(dim));
                         }
                     }
                     _ => {
                         let tx = icon.x + ICON + 22.0;
                         let width = card.x + card.w - tx - 20.0;
-                        let badge = self.brew_badge(app).map(|(label, color)| (label, color, text.measure(r, label, SETUP_SMALL) + 20.0));
+                        let badge = self.brew_badge(app).map(|(label, color)| {
+                            let w = text.measure(r, &label, SETUP_SMALL) + 20.0;
+                            (label, color, w)
+                        });
                         // The title stops short of the badge.
-                        let title_width = badge.map_or(width, |(_, _, w)| width - w + 2.0);
+                        let title_width = badge.as_ref().map_or(width, |(_, _, w)| width - w + 2.0);
                         let title = clip(text, r, &app.title, ENTITY_NAME, title_width);
-                        text.draw_top(r, &title, tx, card.y + 26.0, ENTITY_NAME, a(1.0));
-                        for (l, line) in wrap(text, r, &app.summary, INPUT_SUB, width).iter().take(2).enumerate() {
-                            text.draw_top(r, line, tx, card.y + 66.0 + l as f32 * 26.0, INPUT_SUB, a(0.6));
+                        text.draw_top(r, &title, tx, card.y + 26.0, ENTITY_NAME, a(dim));
+                        if let Some((oldest, _)) = app.unsupported {
+                            let note = s.brew_needs_webos.replace("{min}", &oldest.to_string());
+                            for (l, line) in wrap(text, r, &note, INPUT_SUB, width).iter().take(2).enumerate() {
+                                text.draw_top(r, line, tx, card.y + 66.0 + l as f32 * 26.0, INPUT_SUB, Rgba::hex(0xF2C14E).alpha(0.9 * open));
+                            }
+                        } else {
+                            for (l, line) in wrap(text, r, &app.summary, INPUT_SUB, width).iter().take(2).enumerate() {
+                                text.draw_top(r, line, tx, card.y + 66.0 + l as f32 * 26.0, INPUT_SUB, a(0.6));
+                            }
                         }
                         if let Some((label, color, w)) = badge {
                             let pill = Rect::new(card.x + card.w - w - 14.0, card.y + 12.0, w, 30.0);
                             r.rect(pill, 15.0, color.alpha(open));
-                            text.draw(r, label, pill.x + 10.0, pill.y + 22.0, SETUP_SMALL, Rgba::hex(0x101114).alpha(open));
+                            text.draw(r, &label, pill.x + 10.0, pill.y + 22.0, SETUP_SMALL, Rgba::hex(0x101114).alpha(open));
                         }
                     }
                 }
@@ -366,14 +389,16 @@ impl Home {
         }
     }
 
-    /// Installed, update or root — the one badge a card shows.
-    fn brew_badge(&self, app: &HomebrewApp) -> Option<(&'static str, Rgba)> {
+    /// Installed, update, the webOS it needs or root — the one badge a card shows.
+    fn brew_badge(&self, app: &HomebrewApp) -> Option<(String, Rgba)> {
         let s = self.strings;
-        match self.versions.get(&app.id) {
-            Some(v) if version_newer(&app.package.version, v) => Some((s.brew_update_badge, Rgba::hex(0xF2C14E))),
-            Some(_) => Some((s.brew_installed_badge, Rgba::hex(0x4ADE80))),
-            None if app.root => Some((s.brew_root_badge, Rgba::hex(0xFF8A80))),
-            None => None,
+        match (self.versions.get(&app.id), app.unsupported) {
+            (Some(v), None) if version_newer(&app.package.version, v) => Some((s.brew_update_badge.into(), Rgba::hex(0xF2C14E))),
+            (Some(_), _) => Some((s.brew_installed_badge.into(), Rgba::hex(0x4ADE80))),
+            // The card says which webOS it needs instead.
+            (None, Some(_)) => None,
+            (None, None) if app.root => Some((s.brew_root_badge.into(), Rgba::hex(0xFF8A80))),
+            (None, None) => None,
         }
     }
 
@@ -384,8 +409,9 @@ impl Home {
         let panel = Rect::new(260.0, 150.0, 1400.0, 780.0);
         self.panel(r, panel, open);
         let icon = Rect::new(panel.x + 64.0, panel.y + 64.0, 160.0, 160.0);
+        let dim = if app.unsupported.is_some() { 0.4 } else { 1.0 };
         match (self.brew_atlas, self.brew_icons.get(&app.id)) {
-            (Some(atlas), Some(uv)) => r.image(atlas, icon, *uv, 34.0, a(1.0)),
+            (Some(atlas), Some(uv)) => r.image(atlas, icon, *uv, 34.0, a(dim)),
             _ => r.rect(icon, 34.0, Rgba::hex(0x2C2F38).alpha(open)),
         }
         let x = icon.x + icon.w + 48.0;
@@ -400,20 +426,49 @@ impl Home {
             facts.push(format!("{} {installed}", s.store_installed));
         }
         text.draw_top(r, &facts.join(" · "), x, icon.y + 84.0, SETUP_SMALL, a(0.6));
+        let mut note_y = icon.y + 122.0;
+        if let Some((oldest, webos)) = app.unsupported {
+            let mut note = s.brew_needs_webos.replace("{min}", &oldest.to_string());
+            if let Some(major) = webos {
+                note = format!("{note} {}", s.brew_this_tv.replace("{tv}", &major.to_string()));
+            }
+            let note = clip(text, r, &note, SETUP_SMALL, width);
+            text.draw_top(r, &note, x, note_y, SETUP_SMALL, Rgba::hex(0xF2C14E).alpha(open));
+            note_y += 34.0;
+        }
         if app.root {
             let note = clip(text, r, s.brew_root_note, SETUP_SMALL, width);
-            text.draw_top(r, &note, x, icon.y + 122.0, SETUP_SMALL, Rgba::hex(0xFF8A80).alpha(open));
+            text.draw_top(r, &note, x, note_y, SETUP_SMALL, Rgba::hex(0xFF8A80).alpha(open));
         }
 
-        let description = if app.description.is_empty() { &app.summary } else { &app.description };
-        let mut y = icon.y + icon.h + 48.0;
-        for line in wrap(text, r, description, SETUP_BODY, panel.w - 128.0).iter().take(6) {
-            text.draw_top(r, line, panel.x + 64.0, y, SETUP_BODY, a(0.85));
-            y += 42.0;
-        }
-        if !app.source.is_empty() {
-            let source = clip(text, r, &app.source, SETUP_SMALL, panel.w - 128.0);
-            text.draw_top(r, &source, panel.x + 64.0, y + 8.0, SETUP_SMALL, a(0.45));
+        let buttons = self.brew_buttons(app);
+        let focus = brew.button.min(buttons.len().saturating_sub(1));
+        let installing = matches!(buttons.get(focus), Some(BrewButton::Install | BrewButton::Update | BrewButton::Retry));
+        if app.root && installing && brew.confirm > 0 {
+            // The warning before an app with root rights, in place of the description.
+            let warn = Rect::new(panel.x + 64.0, icon.y + icon.h + 40.0, panel.w - 128.0, 300.0);
+            let amber = Rgba::hex(0xF2C14E);
+            r.rect(warn, 24.0, amber.alpha(0.12 * open));
+            r.stroke(warn, 24.0, 2.0, amber.alpha(0.8 * open));
+            text.draw_top(r, s.brew_risk_title, warn.x + 36.0, warn.y + 28.0, ENTITY_NAME, amber.alpha(open));
+            let mut y = warn.y + 76.0;
+            for line in wrap(text, r, s.brew_risk_warning, SETUP_BODY, warn.w - 72.0).iter().take(4) {
+                text.draw_top(r, line, warn.x + 36.0, y, SETUP_BODY, a(0.9));
+                y += 42.0;
+            }
+            let step = if brew.confirm >= 2 { s.brew_risk_last } else { s.brew_risk_again };
+            text.draw_top(r, step, warn.x + 36.0, warn.y + warn.h - 56.0, SETUP_SMALL, a(0.6));
+        } else {
+            let description = if app.description.is_empty() { &app.summary } else { &app.description };
+            let mut y = icon.y + icon.h + 48.0;
+            for line in wrap(text, r, description, SETUP_BODY, panel.w - 128.0).iter().take(6) {
+                text.draw_top(r, line, panel.x + 64.0, y, SETUP_BODY, a(0.85));
+                y += 42.0;
+            }
+            if !app.source.is_empty() {
+                let source = clip(text, r, &app.source, SETUP_SMALL, panel.w - 128.0);
+                text.draw_top(r, &source, panel.x + 64.0, y + 8.0, SETUP_SMALL, a(0.45));
+            }
         }
 
         // Buttons, or the progress of what is running.
@@ -435,24 +490,30 @@ impl Home {
             }
             _ => {}
         }
-        let buttons = self.brew_buttons(app);
-        let focus = brew.button.min(buttons.len().saturating_sub(1));
         for (i, button) in buttons.iter().enumerate() {
+            let asking = i == focus && app.root && brew.confirm > 0;
             let label = match button {
+                BrewButton::Install | BrewButton::Update | BrewButton::Retry if asking && brew.confirm >= 2 => s.brew_risk_sure,
+                BrewButton::Install | BrewButton::Update | BrewButton::Retry if asking => s.brew_risk_continue,
                 BrewButton::Install => s.store_install,
                 BrewButton::Update => s.store_update,
                 BrewButton::Retry => s.store_retry,
                 BrewButton::Open => s.brew_open,
-                BrewButton::Uninstall if brew.confirm => s.brew_confirm,
+                BrewButton::Uninstall if brew.confirm > 0 => s.brew_confirm,
                 BrewButton::Uninstall => s.brew_uninstall,
             };
             let w = text.measure(r, label, MENU_ITEM) + 72.0;
             let rect = Rect::new(bx, by, w, 64.0);
             self.hits.borrow_mut().push((rect, Target::BrewButton(i)));
             let focused = i == focus;
-            let danger = *button == BrewButton::Uninstall && brew.confirm;
+            let fill = match button {
+                BrewButton::Uninstall if brew.confirm > 0 => Rgba::hex(0xFF6B6B),
+                _ if asking && brew.confirm >= 2 => Rgba::hex(0xFF6B6B),
+                _ if asking => Rgba::hex(0xF2C14E),
+                _ => WHITE,
+            };
             if focused {
-                r.rect(rect, 32.0, if danger { Rgba::hex(0xFF6B6B) } else { WHITE }.alpha(open));
+                r.rect(rect, 32.0, fill.alpha(open));
             } else {
                 r.stroke(rect, 32.0, 1.5, a(0.35));
             }

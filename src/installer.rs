@@ -274,11 +274,54 @@ fn remove_package(_app: &str) -> Result<(), InstallFailure> {
 
 const HOMEBREW_INDEX: &str = "https://repo.webosbrew.org/api/apps.json";
 
+/// Apps outside the repository, listed after its featured apps: each one's release manifest and
+/// the oldest webOS (major version) it supports. On an older TV they show, greyed out.
+const EXTRAS: &[(&str, u32)] = &[(
+    "https://github.com/JulioFerrero/own-your-glass/releases/latest/download/org.ownyourglass.control.manifest.json",
+    10,
+)];
+
+fn extras(agent: &ureq::Agent) -> Vec<model::HomebrewApp> {
+    let webos = webos_major();
+    EXTRAS
+        .iter()
+        .filter_map(|&(url, oldest)| {
+            let manifest = crate::net::get_json(agent, url, &[]).map_err(|error| log!("homebrew: {url}: {error}")).ok()?;
+            let unsupported = (webos.is_none_or(|major| major < oldest)).then_some((oldest, webos));
+            model::extra_app(&manifest, unsupported)
+        })
+        .collect()
+}
+
+/// The TV's webOS major version (`webos_release` in nyx's os_info), None when unknown.
+#[cfg(all(target_os = "linux", target_arch = "arm"))]
+fn webos_major() -> Option<u32> {
+    let info: Value = serde_json::from_slice(&std::fs::read("/var/run/nyx/os_info.json").ok()?).ok()?;
+    info.get("webos_release")?.as_str()?.split('.').next()?.trim().parse().ok()
+}
+
+/// Desktop: `VISION_WEBOS=<major>` plays a TV with that webOS.
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+fn webos_major() -> Option<u32> {
+    std::env::var("VISION_WEBOS").ok()?.parse().ok()
+}
+
 /// Loads the Homebrew repository, then each app's icon (cached on disk).
 pub fn homebrew(data_dir: PathBuf, sink: Sink) {
     spawn("homebrew", move || {
         let agent = crate::net::agent();
-        let apps = crate::net::get_json(&agent, HOMEBREW_INDEX, &[]).map(|index| model::homebrew_apps(&index));
+        let apps = crate::net::get_json(&agent, HOMEBREW_INDEX, &[]).map(|index| {
+            let mut apps = model::homebrew_apps(&index);
+            let mut at = apps.iter().take_while(|a| a.featured).count();
+            for extra in extras(&agent) {
+                // Once the repository lists it, its entry wins.
+                if !apps.iter().any(|a| a.id == extra.id) {
+                    apps.insert(at, extra);
+                    at += 1;
+                }
+            }
+            apps
+        });
         let icons: Vec<(String, String)> = apps.as_ref().map(|a| a.iter().map(|app| (app.id.clone(), app.icon_url.clone())).collect()).unwrap_or_default();
         match &apps {
             Ok(list) => log!("homebrew: {} apps", list.len()),

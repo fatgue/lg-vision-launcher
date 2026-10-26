@@ -63,7 +63,8 @@ struct Options {
     perf: bool,
     frames: Option<u32>,
     screenshot: Option<PathBuf>,
-    keys: Vec<Key>,
+    /// None: `wait`, a step without a key.
+    keys: Vec<Option<Key>>,
     /// Seconds per frame instead of the measured time (reproducible screenshots).
     fixed_dt: Option<f32>,
 }
@@ -106,7 +107,7 @@ fn run(started: Instant) -> Result<(), String> {
             .iter()
             .position(|a| a == "--keys")
             .and_then(|i| args.get(i + 1))
-            .map(|list| list.split(',').filter_map(parse_key).collect())
+            .map(|list| list.split(',').filter_map(|name| if name.trim() == "wait" { Some(None) } else { parse_key(name).map(Some) }).collect())
             .unwrap_or_default(),
         fixed_dt: args.iter().position(|a| a == "--fixed-dt").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()),
     };
@@ -442,7 +443,7 @@ fn run(started: Instant) -> Result<(), String> {
         }
         // Scripted keys (previews/benchmarks): one every 12 frames once data has arrived.
         if home.loaded && frames >= 20 && frames % 12 == 0 {
-            if let Some(key) = options.keys.get(((frames - 20) / 12) as usize) {
+            if let Some(Some(key)) = options.keys.get(((frames - 20) / 12) as usize) {
                 apply(&mut home, &io, *key);
                 dirty = true;
             }

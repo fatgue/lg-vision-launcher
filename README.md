@@ -39,8 +39,12 @@ Open the **Homebrew** tile among your apps and you get the whole
 - **Install** with one click; **Update** shows up as soon as the repository has a newer version.
 - **Open** or **Uninstall** installed apps from the same page (uninstalling asks first).
 - **Safe:** Vision checks each package's SHA-256 against the repository before installing it through
-  Homebrew Channel. Apps that run with root rights are marked *Root* and say so on their page.
-  Vision and Homebrew Channel themselves cannot be uninstalled here.
+  Homebrew Channel. Apps that run with root rights are marked *Root*; before installing or updating
+  one, Vision shows a warning and asks twice. Vision and Homebrew Channel themselves cannot be
+  uninstalled here.
+- **Extras:** [own-your-glass](https://github.com/JulioFerrero/own-your-glass) (hardens the TV: microphones,
+  screen capture, ads, telemetry) is listed too, installed from its GitHub releases. It needs webOS 10
+  or newer; on older TVs it shows greyed out with a note and cannot be installed.
 - The tile behaves like any app: move it or hide it with **Hold OK**.
 
 ![An app's page with the Install button](docs/screenshots/homebrew-app.jpg)
@@ -154,6 +158,7 @@ Vision talks only to what you set up, plus two public services:
 | plex.tv / your Plex server | connected | continue watching, artwork |
 | tivione.zf-labs.de | at most every 6 hours | the signed TiviOne release manifest (no data is sent) |
 | repo.webosbrew.org | the Homebrew page is opened | the app list, icons and the packages you install (no data is sent) |
+| github.com | the Homebrew page is opened | the release manifest of the extras (own-your-glass) and their packages |
 
 Settings and tokens stay on the TV in `/media/developer/vision`. There is no analytics or telemetry.
 
@@ -168,6 +173,7 @@ node scripts/make-icons.mjs     # generate the app icons (once)
 
 cargo run                       # desktop preview with sample data
 cargo run -- --frames 120 --keys down,ok --screenshot shot.png
+                                # (`wait` in --keys skips a step; VISION_WEBOS=10 plays a webOS 10 TV)
 
 node scripts/package.mjs        # TV build (ARMv7 softfp, glibc 2.28) + IPK in out/
 node scripts/tv.mjs install     # upload to the TV and install

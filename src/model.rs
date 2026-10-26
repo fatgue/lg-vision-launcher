@@ -396,6 +396,9 @@ pub struct HomebrewApp {
     pub featured: bool,
     pub source: String,
     pub package: Package,
+    /// The TV's webOS is older than the app supports: (the oldest supported major version,
+    /// the TV's major version if known). Shown, but not installable.
+    pub unsupported: Option<(u32, Option<u32>)>,
 }
 
 /// App ids end up in shell commands (install, uninstall): letters, digits, '.', '-', '_' only.
@@ -411,41 +414,53 @@ pub fn homebrew_apps(index: &Value) -> Vec<HomebrewApp> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|entry| {
-            let manifest = entry.get("manifest")?;
-            let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
-            let id = text(entry, "id");
-            let url = text(manifest, "ipkUrl");
-            let hex = manifest.pointer("/ipkHash/sha256").and_then(Value::as_str)?;
-            if !valid_app_id(&id) || !url.starts_with("https://") || hex.len() != 64 {
-                return None;
-            }
-            let mut sha256 = [0u8; 32];
-            for (i, byte) in sha256.iter_mut().enumerate() {
-                *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
-            }
-            let title = text(entry, "title");
-            Some(HomebrewApp {
-                summary: text(entry, "shortDescription"),
-                description: text(manifest, "appDescription"),
-                icon_url: Some(text(entry, "iconUri")).filter(|u| !u.is_empty()).unwrap_or_else(|| text(manifest, "iconUri")),
-                root: manifest.get("rootRequired").and_then(Value::as_bool).unwrap_or(false),
-                featured: entry.get("featured").and_then(Value::as_bool).unwrap_or(false),
-                source: text(manifest, "sourceUrl"),
-                package: Package {
-                    app: id.clone(),
-                    version: text(manifest, "version"),
-                    url,
-                    sha256,
-                    size: manifest.get("ipkSize").and_then(Value::as_u64),
-                },
-                title: if title.is_empty() { id.clone() } else { title },
-                id,
-            })
-        })
+        .filter_map(|entry| homebrew_app(entry, entry.get("manifest")?))
         .collect();
     apps.sort_by_key(|a| !a.featured);
     apps
+}
+
+/// An app from outside the repository, from its own release manifest (the same fields as a
+/// repository manifest, plus id, title and iconUri).
+pub fn extra_app(manifest: &Value, unsupported: Option<(u32, Option<u32>)>) -> Option<HomebrewApp> {
+    let app = homebrew_app(manifest, manifest)?;
+    Some(HomebrewApp { featured: true, unsupported, ..app })
+}
+
+/// One repository entry: id, title and icon from `entry`, the package from `manifest`.
+fn homebrew_app(entry: &Value, manifest: &Value) -> Option<HomebrewApp> {
+    let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+    let id = text(entry, "id");
+    let url = text(manifest, "ipkUrl");
+    let hex = manifest.pointer("/ipkHash/sha256").and_then(Value::as_str)?;
+    if !valid_app_id(&id) || !url.starts_with("https://") || hex.len() != 64 {
+        return None;
+    }
+    let mut sha256 = [0u8; 32];
+    for (i, byte) in sha256.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    let title = text(entry, "title");
+    let description = text(manifest, "appDescription");
+    let summary = text(entry, "shortDescription");
+    Some(HomebrewApp {
+        summary: if summary.is_empty() { description.clone() } else { summary },
+        description,
+        icon_url: Some(text(entry, "iconUri")).filter(|u| !u.is_empty()).unwrap_or_else(|| text(manifest, "iconUri")),
+        root: manifest.get("rootRequired").and_then(Value::as_bool).unwrap_or(false),
+        featured: entry.get("featured").and_then(Value::as_bool).unwrap_or(false),
+        source: text(manifest, "sourceUrl"),
+        package: Package {
+            app: id.clone(),
+            version: text(manifest, "version"),
+            url,
+            sha256,
+            size: manifest.get("ipkSize").and_then(Value::as_u64),
+        },
+        title: if title.is_empty() { id.clone() } else { title },
+        id,
+        unsupported: None,
+    })
 }
 
 /// TiviOne as installed: its version, and whether it is a developer install (from the
