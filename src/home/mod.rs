@@ -346,6 +346,8 @@ enum SettingId {
     WallpaperUpload,
     /// The TiviOne tile on Home while TiviOne is missing.
     TiviOnePromo,
+    /// As Home: close unused apps when memory runs low.
+    FreeMemory,
     Info,
 }
 
@@ -1568,6 +1570,10 @@ impl Home {
             item(SettingId::Language, s.language, language, None),
             item(SettingId::RefreshImages, s.refresh_images, String::new(), None),
         ];
+        // Only Home sees which apps are used, so only Home frees memory.
+        if self.home_mode {
+            system.insert(1, item(SettingId::FreeMemory, s.free_memory, onoff(ui.free_memory), Some(ui.free_memory)));
+        }
         let info = |label: &str, value: String| SettingItem { id: SettingId::Info, label: label.to_string(), value, on: None, enabled: false };
         system.push(info(s.launcher, if self.home_mode { "Vision" } else { s.lg_home }.to_string()));
         system.push(info(s.ip_address, self.ip.clone().unwrap_or_else(|| "–".into())));
@@ -1677,6 +1683,7 @@ impl Home {
             SettingId::Ambient => ui.ambient = (ui.ambient + 1) % 4,
             SettingId::Motion => ui.reduced_motion = !ui.reduced_motion,
             SettingId::Preview => ui.preview = !ui.preview,
+            SettingId::FreeMemory => ui.free_memory = !ui.free_memory,
             SettingId::Language => {
                 // Automatic → English → Deutsch → … → Automatic.
                 let codes: Vec<&str> = std::iter::once("").chain(crate::strings::LANGUAGES.iter().map(|(c, _, _)| *c)).collect();

@@ -15,6 +15,8 @@ mod log;
 #[cfg(all(target_os = "linux", target_arch = "arm"))]
 mod luna;
 #[cfg_attr(not(all(target_os = "linux", target_arch = "arm")), allow(dead_code))]
+mod memory;
+#[cfg_attr(not(all(target_os = "linux", target_arch = "arm")), allow(dead_code))]
 mod model;
 mod net;
 mod platform;
@@ -193,12 +195,15 @@ fn run(started: Instant) -> Result<(), String> {
         glyph_wait.elapsed().as_millis()
     );
     let t_glyphs = started.elapsed();
+    let free_memory = prefs.ui.free_memory;
     let mut home = Home::new(&renderer, prefs, look);
     home.set_home_mode(home_mode);
     let t_home = started.elapsed();
     let bus = if home_mode {
         let bus = register_home(sdl.waker())?;
         log!("running as Home");
+        memory::set_enabled(free_memory);
+        memory::start();
         bus
     } else {
         None
@@ -548,7 +553,10 @@ fn dispatch(action: Action, io: &Io) -> bool {
             log!("launch {app_id}");
             platform.send(Request::Launch { app_id, params });
         }
-        Some(Action::SavePrefs(prefs)) => platform.send(Request::SavePrefs(prefs)),
+        Some(Action::SavePrefs(prefs)) => {
+            memory::set_enabled(prefs.ui.free_memory);
+            platform.send(Request::SavePrefs(prefs));
+        }
         Some(Action::Service(request)) => io.services.send(request),
         Some(Action::HomeTakeover(on)) => platform.send(Request::HomeTakeover(on)),
         Some(Action::RefreshImages) => platform.send(Request::RefreshImages),
@@ -606,6 +614,9 @@ fn register_home(waker: sdl::Waker) -> Result<Option<video::Bus>, String> {
     let life = Box::new(move |message: serde_json::Value| {
         let event = message.get("event").and_then(|v| v.as_str());
         let app = message.get("appId").and_then(|v| v.as_str()).unwrap_or_default();
+        if let Some(event) = event {
+            memory::app_event(event, app);
+        }
         if matches!(event, Some("splash" | "launch")) && !app.is_empty() && app != HOME_ID && app != APP_ID {
             log!("app starting: {app}");
             waker.lifecycle(LIFECYCLE_OTHER_APP);

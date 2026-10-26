@@ -20,6 +20,7 @@ Rust + SDL2 + a custom OpenGL ES 2 renderer, around 3 MB, no web view.
 - **Homebrew app store:** all apps of the webOS Homebrew repository with icons, details and updates; install and uninstall them on the TV ([see below](#homebrew-app-store)).
 - **Your apps, your order:** LG's apps with full-tile artwork, favourites you can move and hide, HDMI inputs with signal state.
 - **Vision as Home:** the Home key opens Vision instead of LG's launcher, in about 50 ms (see below).
+- **Frees memory:** as Home, Vision closes the app that has been in the background longest when the TV runs low on memory (see below).
 - **Ambient light** taken from the focused tile, a large hero with what is focused, clock and weather.
 - **Home Assistant:** lights, switches and scenes as tiles, chosen by category and room. Set up from the phone via QR code.
 - **Plex:** continue watching, linked through plex.tv/link.
@@ -131,7 +132,7 @@ features; Vision only shows what TiviOne shares with it, and only after you agre
   - Home button: Vision as Home on or off
   - Rows: show or hide each row
   - Appearance: theme, wallpaper and a photo from your phone (Glass), ambient light (Cinematic), motion, live preview
-  - System: language, reload app images, version
+  - System: language, closing unused apps when memory is low (as Home), reload app images, version
 
 ## Vision as Home
 
@@ -146,6 +147,16 @@ sh /var/lib/vision-home/home.sh disable   # back to LG's Home
 role stay untouched and nothing on the read-only system partition changes. Vision registers itself with the
 application manager, so the Home key brings the running instance to the front. A Homebrew Channel boot hook
 (`64-vision-home`, a symlink) re-applies the mount after a cold boot and does nothing if Vision is gone.
+
+## Freeing memory
+
+webOS keeps apps alive in the background and preloads some (Netflix and YouTube, for example). With a
+large app in front, the TV then runs out of memory, swaps, and every app stutters. As Home, Vision
+checks the available memory every 5 seconds. Below 450 MB it closes the app that has been in the
+background longest, one at a time, until 550 MB are free again. It never closes Vision, the app in
+front, an app used in the last two minutes, or system apps (Live TV, inputs, LG's home, voice,
+AirPlay, Homebrew Channel); LG's browser and LG Channels may go. Closed apps simply start fresh the
+next time. Turn it off in **Settings → System → Close unused apps when memory is low**.
 
 ## Network and privacy
 
