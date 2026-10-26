@@ -3,6 +3,10 @@
 A fast, native home launcher for rooted LG webOS TVs (developed on an LG CX, webOS 5).
 Rust + SDL2 + a custom OpenGL ES 2 renderer, around 3 MB, no web view.
 
+> **🍺 Homebrew app store built in.** Browse every app of the webOS Homebrew repository right from
+> your home screen, and install, update or uninstall it with one click. No PC, no Dev Manager.
+> [See how it works ↓](#homebrew-app-store)
+
 ![Vision's home screen](docs/screenshots/home.jpg)
 
 | | |
@@ -13,16 +17,33 @@ Rust + SDL2 + a custom OpenGL ES 2 renderer, around 3 MB, no web view.
 
 ## Features
 
+- **Homebrew app store:** all apps of the webOS Homebrew repository with icons, details and updates; install and uninstall them on the TV ([see below](#homebrew-app-store)).
 - **Your apps, your order:** LG's apps with full-tile artwork, favourites you can move and hide, HDMI inputs with signal state.
 - **Vision as Home:** the Home key opens Vision instead of LG's launcher, in about 50 ms (see below).
 - **Ambient light** taken from the focused tile, a large hero with what is focused, clock and weather.
 - **Home Assistant:** lights, switches and scenes as tiles, chosen by category and room. Set up from the phone via QR code.
 - **Plex:** continue watching, linked through plex.tv/link.
 - **TiviOne (optional):** with the TiviOne IPTV app installed and connected, Vision shows recent and favourite channels, catch-up, upcoming reminders and a muted live preview of the focused channel; the number keys tune channels.
-- **Homebrew:** browse the apps of the webOS Homebrew repository, install, update and uninstall them (see below).
 - **Six languages:** English, German, French, Spanish, Italian, Turkish (follows the TV, can be changed).
 - **Magic Remote:** point to focus, click to open, hold for options, wheel to step along a row.
 - **Two looks:** Cinematic and Glass (see below), switchable in Settings while Vision runs.
+
+## Homebrew app store
+
+![Homebrew apps in Vision](docs/screenshots/homebrew.jpg)
+
+Open the **Homebrew** tile among your apps and you get the whole
+[webOS Homebrew repository](https://repo.webosbrew.org) on your TV:
+
+- **Browse** every app with its icon and description, in three tabs: **All**, **Installed** and **Updates**.
+- **Install** with one click; **Update** shows up as soon as the repository has a newer version.
+- **Open** or **Uninstall** installed apps from the same page (uninstalling asks first).
+- **Safe:** Vision checks each package's SHA-256 against the repository before installing it through
+  Homebrew Channel. Apps that run with root rights are marked *Root* and say so on their page.
+  Vision and Homebrew Channel themselves cannot be uninstalled here.
+- The tile behaves like any app: move it or hide it with **Hold OK**.
+
+![An app's page with the Install button](docs/screenshots/homebrew-app.jpg)
 
 ## Themes
 
@@ -46,18 +67,6 @@ Inter typeface.
 |---|---|
 | ![Glass home](docs/screenshots/glass-home.jpg) | ![Glass Top Shelf](docs/screenshots/glass-shelf.jpg) |
 | ![Glass settings](docs/screenshots/glass-settings.jpg) | ![Moving apps in Glass](docs/screenshots/glass-move.jpg) |
-
-## Homebrew
-
-The **Homebrew** tile (among your apps; move or hide it like any app) opens the apps of the
-[webOS Homebrew repository](https://repo.webosbrew.org): **All**, **Installed** and **Updates**.
-**OK** on an app shows its details with **Install**, **Update**, **Open** or **Uninstall**. Vision checks
-each package's SHA-256 before installing it through Homebrew Channel. Apps that run with root rights
-are marked *Root*. Vision and Homebrew Channel themselves cannot be uninstalled here.
-
-| | |
-|---|---|
-| ![Homebrew apps](docs/screenshots/homebrew.jpg) | ![An app's details](docs/screenshots/homebrew-app.jpg) |
 
 ## Performance
 
@@ -108,6 +117,7 @@ features; Vision only shows what TiviOne shares with it, and only after you agre
 ## Using it
 
 - **Left / Right / Up / Down** move the focus; **OK** opens the app, input or channel.
+- **Homebrew:** open the Homebrew tile; **Left / Right** at the top switch between All, Installed and Updates, **OK** opens an app's page.
 - **Hold OK** on a favourite: **Move** (Left / Right, OK to finish, Back to cancel) or **Hide**.
   Hidden apps have their own row at the bottom; hold OK there to show them again.
 - **Settings:** press **Up** from the top row (or click the gear); in Glass the gear sits at the top left.
