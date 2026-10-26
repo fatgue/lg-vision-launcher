@@ -2,6 +2,7 @@
 mod chrome;
 mod cinematic;
 mod glass;
+mod homebrew;
 mod nav;
 mod overlays;
 
@@ -72,6 +73,10 @@ pub enum Action {
     SetTheme(Look),
     /// Load a Glass wallpaper: a bundled one by name, or `custom`.
     Wallpaper(String),
+    /// Load the Homebrew repository; install or uninstall one of its apps.
+    Homebrew,
+    HomebrewInstall(crate::model::Package),
+    HomebrewRemove(String),
     /// Start (Some) or stop (None) the live preview.
     Preview(Option<Stream>),
     Exit,
@@ -262,6 +267,8 @@ enum Mode {
     Picker(Picker),
     /// The Settings panel (opened from the gear in the header).
     Settings,
+    /// The Homebrew apps page.
+    Homebrew(homebrew::Brew),
     /// TiviOne's store page.
     Store(Store),
 }
@@ -365,6 +372,9 @@ enum Target {
     SettingsRow(usize),
     StoreButton(usize),
     StoreShot(usize),
+    BrewTab(usize),
+    BrewCard(usize),
+    BrewButton(usize),
 }
 
 struct Hero {
@@ -391,6 +401,15 @@ pub struct Home {
     wiggle: f32,
     /// Glass wallpaper and its blurred copy (for the dock), once loaded.
     wallpaper: Option<(Texture, Texture)>,
+    /// The Homebrew page: the repository (None while loading), icons, running installs, and
+    /// every installed app's version.
+    brew: Option<Result<Vec<crate::model::HomebrewApp>, String>>,
+    brew_icons: HashMap<String, [f32; 4]>,
+    brew_atlas: Option<Texture>,
+    brew_next: i32,
+    brew_progress: HashMap<String, InstallState>,
+    brew_scroll: Spring,
+    versions: HashMap<String, String>,
     strings: &'static Strings,
     rails: [Rail; 9],
     active: usize,
@@ -465,6 +484,13 @@ impl Home {
             previous_backdrop: None,
             backdrop_t: Spring::new(1.0, 8.0),
             wallpaper: None,
+            brew: None,
+            brew_icons: HashMap::new(),
+            brew_atlas: None,
+            brew_next: 0,
+            brew_progress: HashMap::new(),
+            brew_scroll: Spring::new(0.0, 16.0),
+            versions: HashMap::new(),
             tilt_x: Spring::new(0.0, 7.0),
             tilt_y: Spring::new(0.0, 7.0),
             wiggle: 0.0,
@@ -634,6 +660,13 @@ impl Home {
     /// Moves focus to whatever the pointer is over. Returns true when something changed.
     pub fn pointer(&mut self, x: f32, y: f32) -> bool {
         let Some((rect, target)) = self.hit_rect(x, y) else { return false };
+        if matches!(self.mode, Mode::Homebrew(_)) {
+            let changed = self.brew_pointer(target);
+            if changed {
+                self.refocus(false);
+            }
+            return changed;
+        }
         if self.look == Look::Glass {
             // The tile under the pointer tilts towards it.
             self.tilt_x.target = ((x - rect.x - rect.w * 0.5) / (rect.w * 0.5)).clamp(-1.0, 1.0);
@@ -724,7 +757,17 @@ impl Home {
 
     // ---- Data in --------------------------------------------------------------------
 
-    pub fn set_apps(&mut self, apps: Vec<App>) {
+    pub fn set_apps(&mut self, mut apps: Vec<App>) {
+        // The Homebrew page opens from a tile among the apps (it can be moved and hidden).
+        apps.push(App {
+            id: homebrew::HOMEBREW_TILE.into(),
+            title: "Homebrew".into(),
+            icon_path: None,
+            bg_color: Some("#C0392B".into()),
+            params: None,
+            art_path: None,
+            art_is_splash: false,
+        });
         self.apps = apps;
         self.rebuild_app_rails();
         // The Settings row and the TiviOne offer depend on what is installed.
@@ -1333,6 +1376,27 @@ impl Home {
 
     /// Packs an icon into the shared atlas once and tints every tile of that app.
     pub fn add_icon(&mut self, icon: Icon, renderer: &Renderer) {
+        let channel = icon.app_id == crate::model::HOMEBREW_CHANNEL;
+        self.add_icon_for(icon, renderer);
+        // The Homebrew tile wears Homebrew Channel's icon.
+        if channel {
+            self.alias(crate::model::HOMEBREW_CHANNEL, homebrew::HOMEBREW_TILE);
+        }
+    }
+
+    fn alias(&mut self, from: &str, to: &str) {
+        if let Some(icon) = self.icons.get(from).copied() {
+            self.icons.insert(to.to_string(), icon);
+        }
+        if let Some(fill) = self.blended.get(from).copied() {
+            self.blended.insert(to.to_string(), fill);
+        }
+        if let Some(color) = self.colors.get(from).copied() {
+            self.tint_id(to, color);
+        }
+    }
+
+    fn add_icon_for(&mut self, icon: Icon, renderer: &Renderer) {
         if let Some(color) = icon.color {
             if !self.arts.contains_key(&icon.app_id) {
                 self.tint_id(&icon.app_id, Rgba::from_u8(color));
@@ -1399,6 +1463,7 @@ impl Home {
             Mode::Picker(_) => self.picker_key(key),
             Mode::Settings => self.settings_key(key),
             Mode::Store(_) => self.store_key(key),
+            Mode::Homebrew(_) => self.homebrew_key(key),
             Mode::Browse if self.header && self.look == Look::Cinematic => self.header_key(key),
             Mode::Browse if matches!(key, Key::Digit(_)) || (self.digits.is_some() && key == Key::Ok) => self.digit_key(key),
             Mode::Browse => self.browse_key(key, home_mode),
@@ -1786,6 +1851,9 @@ impl Home {
     }
 
     fn activate(&mut self) -> Option<Action> {
+        if self.focused().is_some_and(|t| t.id == homebrew::HOMEBREW_TILE) {
+            return self.open_homebrew();
+        }
         let rail = &mut self.rails[self.active];
         let tile = rail.tiles.get_mut(rail.focus)?;
         match tile.kind {
@@ -1982,7 +2050,8 @@ impl Home {
 
     fn refocus(&mut self, instant: bool) {
         let moving = matches!(self.mode, Mode::Move { .. });
-        let overlay = matches!(self.mode, Mode::Menu(_) | Mode::Setup { .. } | Mode::Offer { .. } | Mode::Picker(_) | Mode::Settings | Mode::Store(_));
+        let overlay = matches!(self.mode, Mode::Menu(_) | Mode::Setup { .. } | Mode::Offer { .. } | Mode::Picker(_) | Mode::Settings | Mode::Store(_) | Mode::Homebrew(_));
+        self.brew_refocus();
         let active = self.active;
         for (r, rail) in self.rails.iter_mut().enumerate() {
             for (i, tile) in rail.tiles.iter_mut().enumerate() {
@@ -2123,6 +2192,7 @@ impl Home {
             }
         }
         moving |= self.vscroll.step(dt);
+        moving |= self.brew_scroll.step(dt);
         if self.look == Look::Glass {
             moving |= self.glass_step(dt);
         }

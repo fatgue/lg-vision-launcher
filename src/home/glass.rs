@@ -267,6 +267,7 @@ impl Home {
         self.draw_offer(r, text);
         self.draw_settings(r, text);
         self.draw_store(r, text);
+        self.draw_homebrew(r, text);
         self.draw_picker(r, text);
         self.draw_digits(r, text);
         self.draw_notice(r, text);

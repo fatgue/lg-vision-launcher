@@ -90,6 +90,12 @@ pub enum Update {
     Picture(Picture),
     /// The Glass wallpaper, decoded (None: it could not be loaded).
     Wallpaper(Option<Wallpaper>),
+    /// The Homebrew repository, or why it could not be loaded.
+    Homebrew(Result<Vec<HomebrewApp>, String>),
+    HomebrewIcon(Icon),
+    HomebrewInstall { app: String, state: InstallState },
+    /// Installed version of every app (id, version).
+    Versions(Vec<(String, String)>),
 }
 
 /// TiviOne's home-screen snapshot (see tivione/src/core/launcher.ts).
@@ -359,6 +365,89 @@ pub struct Release {
     pub pictures: Vec<String>,
 }
 
+impl Release {
+    pub fn package(&self) -> Package {
+        Package { app: TIVIONE_APP.into(), version: self.version.clone(), url: self.url.clone(), sha256: self.sha256, size: Some(self.size) }
+    }
+}
+
+/// Something to download, verify and install.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Package {
+    pub app: String,
+    pub version: String,
+    pub url: String,
+    pub sha256: [u8; 32],
+    pub size: Option<u64>,
+}
+
+pub const HOMEBREW_CHANNEL: &str = "org.webosbrew.hbchannel";
+
+/// An app in the Homebrew Channel repository (repo.webosbrew.org).
+#[derive(Clone, Debug)]
+pub struct HomebrewApp {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub description: String,
+    pub icon_url: String,
+    /// Runs with root rights on the TV.
+    pub root: bool,
+    pub featured: bool,
+    pub source: String,
+    pub package: Package,
+}
+
+/// App ids end up in shell commands (install, uninstall): letters, digits, '.', '-', '_' only.
+pub fn valid_app_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// The repository index (`api/apps.json`), featured apps first; entries without a valid id,
+/// package address or checksum are left out.
+pub fn homebrew_apps(index: &Value) -> Vec<HomebrewApp> {
+    let mut apps: Vec<HomebrewApp> = index
+        .get("packages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let manifest = entry.get("manifest")?;
+            let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+            let id = text(entry, "id");
+            let url = text(manifest, "ipkUrl");
+            let hex = manifest.pointer("/ipkHash/sha256").and_then(Value::as_str)?;
+            if !valid_app_id(&id) || !url.starts_with("https://") || hex.len() != 64 {
+                return None;
+            }
+            let mut sha256 = [0u8; 32];
+            for (i, byte) in sha256.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+            }
+            let title = text(entry, "title");
+            Some(HomebrewApp {
+                summary: text(entry, "shortDescription"),
+                description: text(manifest, "appDescription"),
+                icon_url: Some(text(entry, "iconUri")).filter(|u| !u.is_empty()).unwrap_or_else(|| text(manifest, "iconUri")),
+                root: manifest.get("rootRequired").and_then(Value::as_bool).unwrap_or(false),
+                featured: entry.get("featured").and_then(Value::as_bool).unwrap_or(false),
+                source: text(manifest, "sourceUrl"),
+                package: Package {
+                    app: id.clone(),
+                    version: text(manifest, "version"),
+                    url,
+                    sha256,
+                    size: manifest.get("ipkSize").and_then(Value::as_u64),
+                },
+                title: if title.is_empty() { id.clone() } else { title },
+                id,
+            })
+        })
+        .collect();
+    apps.sort_by_key(|a| !a.featured);
+    apps
+}
+
 /// TiviOne as installed: its version, and whether it is a developer install (from the
 /// website, kept up to date by Vision) rather than LG's store.
 #[derive(Clone, Debug, PartialEq)]
@@ -372,6 +461,7 @@ pub enum InstallState {
     Idle,
     Downloading(f32),
     Installing,
+    Removing,
     Done,
     Failed(InstallFailure),
 }
@@ -475,6 +565,17 @@ fn box_blur(data: &mut [f32], w: usize, h: usize, radius: usize, horizontal: boo
     }
 }
 
+/// Every app's version from `listApps`.
+pub fn versions_from_apps(reply: &Value) -> Vec<(String, String)> {
+    reply
+        .get("apps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|a| Some((a.get("id")?.as_str()?.to_string(), a.get("version")?.as_str()?.to_string())))
+        .collect()
+}
+
 /// Dotted version comparison ("1.0.10" > "1.0.9"); missing parts count as 0.
 pub fn version_newer(a: &str, b: &str) -> bool {
     let parts = |v: &str| -> Vec<u64> { v.split('.').map(|p| p.trim().parse().unwrap_or(0)).collect() };
@@ -502,6 +603,10 @@ pub enum Request {
     Pictures(Release),
     /// Decode a wallpaper JPEG.
     Wallpaper(std::path::PathBuf),
+    /// Load the Homebrew repository and its icons.
+    Homebrew,
+    HomebrewInstall(Package),
+    HomebrewRemove(String),
 }
 
 /// Normalises `listLaunchPoints` (LG's Home bar, already in the user's order), taking each

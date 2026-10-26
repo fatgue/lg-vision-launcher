@@ -2,7 +2,7 @@
 //! website, the pictures for its store page, and downloading, verifying and installing the IPK
 //! (as root, through Homebrew Channel). Everything runs on short-lived threads of its own.
 use crate::log::log;
-use crate::model::{self, InstallFailure, InstallState, Picture, Release, Update, TIVIONE_APP};
+use crate::model::{self, InstallFailure, InstallState, Package, Picture, Release, Update, TIVIONE_APP};
 use crate::platform::Sink;
 use base64::Engine;
 use serde_json::Value;
@@ -117,46 +117,51 @@ pub fn pictures(release: Release, data_dir: PathBuf, sink: Sink) {
     });
 }
 
-/// Downloads, verifies and installs the release, reporting progress as `Update::Install`.
-pub fn install(release: Release, data_dir: PathBuf, sink: Sink) {
+/// How install progress reaches the UI (TiviOne's page or the Homebrew page).
+pub type Report = fn(&str, InstallState) -> Update;
+
+/// Downloads, verifies (SHA-256) and installs a package, reporting progress through `report`.
+pub fn install(package: Package, data_dir: PathBuf, sink: Sink, report: Report) {
     spawn("install", move || {
         let dir = data_dir.join("download");
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("tivione.ipk");
-        let result = download(&release, &path, &sink).and_then(|()| {
-            sink.send(Update::Install(InstallState::Installing));
+        let path = dir.join("package.ipk");
+        let send = |state| sink.send(report(&package.app, state));
+        let result = download(&package, &path, &send).and_then(|()| {
+            send(InstallState::Installing);
             install_package(&path)
         });
         let _ = std::fs::remove_file(&path);
         match result {
             Ok(()) => {
-                log!("tivione {} installed", release.version);
-                sink.send(Update::Install(InstallState::Done));
+                log!("{} {} installed", package.app, package.version);
+                send(InstallState::Done);
             }
             Err(failure) => {
-                log!("tivione install: {failure:?}");
-                sink.send(Update::Install(InstallState::Failed(failure)));
+                log!("{} install: {failure:?}", package.app);
+                send(InstallState::Failed(failure));
             }
         }
     });
 }
 
-fn download(release: &Release, path: &Path, sink: &Sink) -> Result<(), InstallFailure> {
+fn download(package: &Package, path: &Path, send: &dyn Fn(InstallState)) -> Result<(), InstallFailure> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(5))
         .timeout_read(Duration::from_secs(30))
         .user_agent(concat!("Vision/", env!("CARGO_PKG_VERSION")))
         .build();
-    let response = agent.get(&release.url).call().map_err(|error| {
-        log!("tivione download: {error}");
+    let response = agent.get(&package.url).call().map_err(|error| {
+        log!("download {}: {error}", package.app);
         InstallFailure::Network
     })?;
-    let mut reader = response.into_reader().take(release.size + 1);
+    let expected = package.size.or_else(|| response.header("Content-Length").and_then(|v| v.parse().ok()));
+    let mut reader = response.into_reader().take(expected.map_or(MAX_IPK, |s| s.min(MAX_IPK)) + 1);
     let mut file = std::fs::File::create(path).map_err(|_| InstallFailure::Network)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 << 10];
     let (mut total, mut reported) = (0u64, -1i32);
-    sink.send(Update::Install(InstallState::Downloading(0.0)));
+    send(InstallState::Downloading(0.0));
     loop {
         let n = reader.read(&mut buffer).map_err(|_| InstallFailure::Network)?;
         if n == 0 {
@@ -165,14 +170,16 @@ fn download(release: &Release, path: &Path, sink: &Sink) -> Result<(), InstallFa
         hasher.update(&buffer[..n]);
         file.write_all(&buffer[..n]).map_err(|_| InstallFailure::Network)?;
         total += n as u64;
-        let percent = (total * 100 / release.size.max(1)).min(100) as i32;
-        if percent >= reported + 5 {
-            reported = percent;
-            sink.send(Update::Install(InstallState::Downloading(percent as f32 / 100.0)));
+        if let Some(size) = expected {
+            let percent = (total * 100 / size.max(1)).min(100) as i32;
+            if percent >= reported + 5 {
+                reported = percent;
+                send(InstallState::Downloading(percent as f32 / 100.0));
+            }
         }
     }
     let digest: [u8; 32] = hasher.finalize().into();
-    if total != release.size || digest != release.sha256 {
+    if package.size.is_some_and(|size| total != size) || total > MAX_IPK || digest != package.sha256 {
         return Err(InstallFailure::Damaged);
     }
     Ok(())
@@ -219,6 +226,90 @@ fn install_package(path: &Path) -> Result<(), InstallFailure> {
     };
     let _ = exec(&mut luna, &format!("kill $(cat {PID}) 2>/dev/null; rm -f {OUTPUT} {PID}"));
     outcome
+}
+
+/// Uninstalls an app (developer install) as root, reporting through `Update::HomebrewInstall`.
+pub fn remove(app: String, sink: Sink) {
+    spawn("uninstall", move || {
+        let state = if model::valid_app_id(&app) { remove_package(&app) } else { Err(InstallFailure::Refused) };
+        let state = match state {
+            Ok(()) => InstallState::Done,
+            Err(failure) => InstallState::Failed(failure),
+        };
+        log!("uninstall {app}: {state:?}");
+        sink.send(Update::HomebrewInstall { app, state });
+    });
+}
+
+#[cfg(all(target_os = "linux", target_arch = "arm"))]
+fn remove_package(app: &str) -> Result<(), InstallFailure> {
+    use crate::luna::Luna;
+    use serde_json::json;
+    let mut luna = Luna::connect().map_err(|_| InstallFailure::NeedsRoot)?;
+    let mut exec = |command: &str| -> Result<String, InstallFailure> {
+        let reply = luna.call("luna://org.webosbrew.hbchannel.service/exec", &json!({ "command": command })).map_err(|_| InstallFailure::NeedsRoot)?;
+        match reply.get("returnValue").and_then(Value::as_bool) {
+            Some(true) => Ok(reply.get("stdoutString").and_then(Value::as_str).unwrap_or_default().to_string()),
+            _ => Err(InstallFailure::NeedsRoot),
+        }
+    };
+    // `app` is a checked id (letters, digits, '.', '-', '_'), safe inside the command.
+    let payload = json!({ "id": app, "subscribe": true }).to_string();
+    exec(&format!("luna-send -n 4 -w 30000 luna://com.webos.appInstallService/dev/remove '{payload}' >/dev/null 2>&1; true"))?;
+    let dir = format!("/media/developer/apps/usr/palm/applications/{app}");
+    for _ in 0..20 {
+        if exec(&format!("[ -d '{dir}' ] && echo present || echo gone"))?.trim() == "gone" {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Err(InstallFailure::Refused)
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+fn remove_package(_app: &str) -> Result<(), InstallFailure> {
+    log!("uninstall (desktop): only on the TV");
+    Err(InstallFailure::NeedsRoot)
+}
+
+const HOMEBREW_INDEX: &str = "https://repo.webosbrew.org/api/apps.json";
+
+/// Loads the Homebrew repository, then each app's icon (cached on disk).
+pub fn homebrew(data_dir: PathBuf, sink: Sink) {
+    spawn("homebrew", move || {
+        let agent = crate::net::agent();
+        let apps = crate::net::get_json(&agent, HOMEBREW_INDEX, &[]).map(|index| model::homebrew_apps(&index));
+        let icons: Vec<(String, String)> = apps.as_ref().map(|a| a.iter().map(|app| (app.id.clone(), app.icon_url.clone())).collect()).unwrap_or_default();
+        match &apps {
+            Ok(list) => log!("homebrew: {} apps", list.len()),
+            Err(error) => log!("homebrew: {error}"),
+        }
+        sink.send(Update::Homebrew(apps));
+        let dir = data_dir.join("homebrew-icons");
+        let _ = std::fs::create_dir_all(&dir);
+        for (id, url) in icons {
+            if url.is_empty() {
+                continue;
+            }
+            let path = dir.join(format!("{id}.img"));
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(_) => match crate::net::get_bytes(&agent, &url, &[], 1 << 20) {
+                    Ok(bytes) => {
+                        let _ = std::fs::write(&path, &bytes);
+                        bytes
+                    }
+                    Err(_) => continue,
+                },
+            };
+            match model::decode_icon(&id, &bytes) {
+                Ok(icon) => sink.send(Update::HomebrewIcon(icon)),
+                Err(_) => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    });
 }
 
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]

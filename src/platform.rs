@@ -172,7 +172,14 @@ mod backend {
                 Request::HomeTakeover(on) => log!("preview: home takeover {on}"),
                 Request::RefreshImages => log!("preview: refresh images"),
                 Request::SavePrefs(prefs) => save_prefs(&prefs, &data_dir),
-                Request::Install(release) => crate::installer::install(release, data_dir.clone(), sink.clone()),
+                Request::Install(release) => {
+                    crate::installer::install(release.package(), data_dir.clone(), sink.clone(), |_, state| Update::Install(state))
+                }
+                Request::HomebrewInstall(package) => crate::installer::install(package, data_dir.clone(), sink.clone(), |app, state| {
+                    Update::HomebrewInstall { app: app.to_string(), state }
+                }),
+                Request::HomebrewRemove(app) => crate::installer::remove(app, sink.clone()),
+                Request::Homebrew => crate::installer::homebrew(data_dir.clone(), sink.clone()),
                 Request::Pictures(release) => crate::installer::pictures(release, data_dir.clone(), sink.clone()),
                 Request::Wallpaper(path) => load_wallpaper(path, sink.clone()),
             }
@@ -230,7 +237,14 @@ mod backend {
                 }
                 Request::Launch { app_id, params } => launch(&mut luna, &sink, &app_id, params),
                 Request::SavePrefs(prefs) => save_prefs(&prefs, &state.data_dir),
-                Request::Install(release) => crate::installer::install(release, state.data_dir.clone(), sink.clone()),
+                Request::Install(release) => {
+                    crate::installer::install(release.package(), state.data_dir.clone(), sink.clone(), |_, state| Update::Install(state))
+                }
+                Request::HomebrewInstall(package) => crate::installer::install(package, state.data_dir.clone(), sink.clone(), |app, state| {
+                    Update::HomebrewInstall { app: app.to_string(), state }
+                }),
+                Request::HomebrewRemove(app) => crate::installer::remove(app, sink.clone()),
+                Request::Homebrew => crate::installer::homebrew(state.data_dir.clone(), sink.clone()),
                 Request::Pictures(release) => crate::installer::pictures(release, state.data_dir.clone(), sink.clone()),
                 Request::Wallpaper(path) => load_wallpaper(path, sink.clone()),
                 Request::HomeTakeover(on) => {
@@ -293,6 +307,7 @@ mod backend {
         sink.send(Update::Apps(apps.clone()));
         if let Some(all_apps) = &all_apps {
             sink.send(Update::TiviOne(model::tivione_from_apps(all_apps)));
+            sink.send(Update::Versions(model::versions_from_apps(all_apps)));
         }
         // New TiviOne releases on a foreground refresh: every six hours, or after 15 minutes
         // when the last check got no answer.

@@ -19,6 +19,7 @@ Rust + SDL2 + a custom OpenGL ES 2 renderer, around 3 MB, no web view.
 - **Home Assistant:** lights, switches and scenes as tiles, chosen by category and room. Set up from the phone via QR code.
 - **Plex:** continue watching, linked through plex.tv/link.
 - **TiviOne (optional):** with the TiviOne IPTV app installed and connected, Vision shows recent and favourite channels, catch-up, upcoming reminders and a muted live preview of the focused channel; the number keys tune channels.
+- **Homebrew:** browse the apps of the webOS Homebrew repository, install, update and uninstall them (see below).
 - **Six languages:** English, German, French, Spanish, Italian, Turkish (follows the TV, can be changed).
 - **Magic Remote:** point to focus, click to open, hold for options, wheel to step along a row.
 - **Two looks:** Cinematic and Glass (see below), switchable in Settings while Vision runs.
@@ -46,6 +47,18 @@ Inter typeface.
 | ![Glass home](docs/screenshots/glass-home.jpg) | ![Glass Top Shelf](docs/screenshots/glass-shelf.jpg) |
 | ![Glass settings](docs/screenshots/glass-settings.jpg) | ![Moving apps in Glass](docs/screenshots/glass-move.jpg) |
 
+## Homebrew
+
+The **Homebrew** tile (among your apps; move or hide it like any app) opens the apps of the
+[webOS Homebrew repository](https://repo.webosbrew.org): **All**, **Installed** and **Updates**.
+**OK** on an app shows its details with **Install**, **Update**, **Open** or **Uninstall**. Vision checks
+each package's SHA-256 before installing it through Homebrew Channel. Apps that run with root rights
+are marked *Root*. Vision and Homebrew Channel themselves cannot be uninstalled here.
+
+| | |
+|---|---|
+| ![Homebrew apps](docs/screenshots/homebrew.jpg) | ![An app's details](docs/screenshots/homebrew-app.jpg) |
+
 ## Performance
 
 Performance comes first. Measured on the CX (Mali-G51):
@@ -70,7 +83,7 @@ How it stays fast:
 ## Installing
 
 Vision needs a **rooted** LG webOS TV with [Homebrew Channel](https://github.com/webosbrew/webos-homebrew-channel)
-(root is used for the app list and artwork, switching the Home key and installing TiviOne).
+(root is used for the app list and artwork, switching the Home key and installing apps).
 
 1. Download the `.ipk` from the [latest release](https://github.com/fatgue/lg-vision-launcher/releases).
 2. Install it with Homebrew Channel or the webOS Dev Manager.
@@ -130,6 +143,7 @@ Vision talks only to what you set up, plus two public services:
 | Your Home Assistant | connected | states and your actions (LAN) |
 | plex.tv / your Plex server | connected | continue watching, artwork |
 | tivione.zf-labs.de | at most every 6 hours | the signed TiviOne release manifest (no data is sent) |
+| repo.webosbrew.org | the Homebrew page is opened | the app list, icons and the packages you install (no data is sent) |
 
 Settings and tokens stay on the TV in `/media/developer/vision`. There is no analytics or telemetry.
 
@@ -163,11 +177,12 @@ Every push to `main` builds it too (download it from the workflow run).
 src/main.rs       event loop, window and GL context, frame timing
 src/render.rs     GLES2 batch renderer (SDF shader)
 src/text.rs       glyph atlas (fontdue)
-src/home.rs       home screen: state, focus, drawing, settings, TiviOne page
+src/home/         home screen: state and focus (mod.rs), the Cinematic and Glass looks,
+                  navigation, settings and pages (TiviOne, Homebrew)
 src/theme.rs      design tokens
 src/platform.rs   TV services worker (desktop: sample data)
 src/services.rs   weather, Home Assistant, Plex, TiviOne snapshot
-src/installer.rs  TiviOne release check, download, verification, install
+src/installer.rs  TiviOne release check; download, verification, install and uninstall of apps
 src/video.rs      live preview on the TV's video plane
 src/luna.rs       Luna client (libluna-service2 + GLib)
 src/strings.rs    all user-visible text, six languages

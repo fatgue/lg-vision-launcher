@@ -422,6 +422,10 @@ fn run(started: Instant) -> Result<(), String> {
                 Update::Install(state) => home.set_install(state),
                 Update::Picture(picture) => home.add_picture(picture, &renderer),
                 Update::Wallpaper(image) => home.set_wallpaper(image, &renderer),
+                Update::Homebrew(apps) => home.set_homebrew(apps),
+                Update::HomebrewIcon(icon) => home.add_brew_icon(icon, &renderer),
+                Update::HomebrewInstall { app, state } => home.set_brew_install(app, state),
+                Update::Versions(versions) => home.set_versions(versions),
                 Update::TvPair(key) => platform.send(Request::Launch {
                     app_id: model::TIVIONE_APP.into(),
                     params: Some(serde_json::json!({ "launcherPair": { "key": key } })),
@@ -554,6 +558,13 @@ fn dispatch(action: Action, io: &Io) -> bool {
             platform.send(Request::Install(release));
         }
         Some(Action::Pictures(release)) => platform.send(Request::Pictures(release)),
+        Some(Action::Homebrew) => platform.send(Request::Homebrew),
+        Some(Action::HomebrewInstall(package)) => {
+            // Installing may end a running app; free the decoder like a launch does.
+            io.video.release();
+            platform.send(Request::HomebrewInstall(package));
+        }
+        Some(Action::HomebrewRemove(app)) => platform.send(Request::HomebrewRemove(app)),
         Some(Action::Wallpaper(name)) => {
             let path = match name.as_str() {
                 "custom" => io.data_dir.join("wallpaper.jpg"),
