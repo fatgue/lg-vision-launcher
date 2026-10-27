@@ -103,6 +103,10 @@ Vision needs a **rooted** LG webOS TV with [Homebrew Channel](https://github.com
 2. Install it with Homebrew Channel or the webOS Dev Manager.
 3. Open Vision. To make it your Home launcher: **Settings → Home button → Vision as Home**.
 
+**Updates:** Vision looks for a new release on GitHub every six hours. When there is one, it says so,
+and **Settings → System → Vision update** installs it (checked against the release's `SHA256SUMS`)
+and restarts Vision.
+
 ## TiviOne
 
 [TiviOne](https://tivione.zf-labs.de) is an IPTV player for LG TVs by the same developer. It brings its own
@@ -132,7 +136,7 @@ features; Vision only shows what TiviOne shares with it, and only after you agre
   - Home button: Vision as Home on or off
   - Rows: show or hide each row
   - Appearance: theme, wallpaper and a photo from your phone (Glass), ambient light (Cinematic), motion, live preview
-  - System: language, closing unused apps when memory is low (as Home), reload app images, version
+  - System: Vision update (when there is one), language, closing unused apps when memory is low (as Home), reload app images, version
 
 ## Vision as Home
 
@@ -170,6 +174,7 @@ Vision talks only to what you set up, plus two public services:
 | tivione.zf-labs.de | at most every 6 hours | the signed TiviOne release manifest (no data is sent) |
 | repo.webosbrew.org | the Homebrew page is opened | the app list, icons and the packages you install (no data is sent) |
 | github.com | the Homebrew page is opened | the release manifest of the extras (own-your-glass) and their packages |
+| api.github.com | at most every 6 hours | Vision's latest release (no data is sent) |
 
 Settings and tokens stay on the TV in `/media/developer/vision`. There is no analytics or telemetry.
 

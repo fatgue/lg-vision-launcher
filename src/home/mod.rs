@@ -77,6 +77,8 @@ pub enum Action {
     Homebrew,
     HomebrewInstall(crate::model::Package),
     HomebrewRemove(String),
+    /// Install a newer Vision (it restarts afterwards).
+    VisionUpdate(crate::model::Package),
     /// Start (Some) or stop (None) the live preview.
     Preview(Option<Stream>),
     Exit,
@@ -348,6 +350,8 @@ enum SettingId {
     TiviOnePromo,
     /// As Home: close unused apps when memory runs low.
     FreeMemory,
+    /// Install the newer Vision release.
+    VisionUpdate,
     Info,
 }
 
@@ -406,6 +410,9 @@ pub struct Home {
     /// The Homebrew page: the repository (None while loading), icons, running installs, and
     /// every installed app's version.
     brew: Option<Result<Vec<crate::model::HomebrewApp>, String>>,
+    /// A newer Vision release, and how installing it goes.
+    vision_update: Option<crate::model::Package>,
+    vision_install: InstallState,
     brew_icons: HashMap<String, [f32; 4]>,
     brew_atlas: Option<Texture>,
     brew_next: i32,
@@ -487,6 +494,8 @@ impl Home {
             backdrop_t: Spring::new(1.0, 8.0),
             wallpaper: None,
             brew: None,
+            vision_update: None,
+            vision_install: InstallState::Idle,
             brew_icons: HashMap::new(),
             brew_atlas: None,
             brew_next: 0,
@@ -1065,6 +1074,21 @@ impl Home {
         self.refocus(false);
     }
 
+    pub fn set_vision_release(&mut self, package: Option<crate::model::Package>) {
+        if let Some(p) = &package {
+            if self.vision_update.as_ref().map(|u| &u.version) != Some(&p.version) {
+                let s = self.strings;
+                let text = format!("{}: {} → {}", s.vision_update_notice.replace("{v}", &p.version), s.settings, s.sections[6]);
+                self.notice = Some((text, Instant::now()));
+            }
+        }
+        self.vision_update = package;
+    }
+
+    pub fn set_vision_install(&mut self, state: InstallState) {
+        self.vision_install = state;
+    }
+
     pub fn set_install(&mut self, state: InstallState) {
         if state == InstallState::Done {
             self.install = InstallState::Idle;
@@ -1566,13 +1590,30 @@ impl Home {
                 format!("{} ({name})", s.automatic)
             }
         };
-        let mut system = vec![
+        let mut system = Vec::new();
+        if let Some(update) = &self.vision_update {
+            let value = match &self.vision_install {
+                InstallState::Downloading(p) => format!("{} {:.0} %", s.store_downloading, p * 100.0),
+                InstallState::Installing => s.store_installing.to_string(),
+                InstallState::Done => s.vision_restarting.to_string(),
+                InstallState::Failed(failure) => match failure {
+                    InstallFailure::Network => s.fail_network,
+                    InstallFailure::Damaged => s.fail_damaged,
+                    InstallFailure::NeedsRoot => s.fail_root,
+                    InstallFailure::Refused => s.fail_refused,
+                }
+                .to_string(),
+                _ => s.vision_update_available.replace("{v}", &update.version),
+            };
+            system.push(item(SettingId::VisionUpdate, s.vision_update, value, None));
+        }
+        system.extend([
             item(SettingId::Language, s.language, language, None),
             item(SettingId::RefreshImages, s.refresh_images, String::new(), None),
-        ];
+        ]);
         // Only Home sees which apps are used, so only Home frees memory.
         if self.home_mode {
-            system.insert(1, item(SettingId::FreeMemory, s.free_memory, onoff(ui.free_memory), Some(ui.free_memory)));
+            system.insert(system.len() - 1, item(SettingId::FreeMemory, s.free_memory, onoff(ui.free_memory), Some(ui.free_memory)));
         }
         let info = |label: &str, value: String| SettingItem { id: SettingId::Info, label: label.to_string(), value, on: None, enabled: false };
         system.push(info(s.launcher, if self.home_mode { "Vision" } else { s.lg_home }.to_string()));
@@ -1684,6 +1725,12 @@ impl Home {
             SettingId::Motion => ui.reduced_motion = !ui.reduced_motion,
             SettingId::Preview => ui.preview = !ui.preview,
             SettingId::FreeMemory => ui.free_memory = !ui.free_memory,
+            SettingId::VisionUpdate => {
+                let busy = matches!(self.vision_install, InstallState::Downloading(_) | InstallState::Installing | InstallState::Done);
+                let package = self.vision_update.clone().filter(|_| !busy)?;
+                self.vision_install = InstallState::Downloading(0.0);
+                return Some(Action::VisionUpdate(package));
+            }
             SettingId::Language => {
                 // Automatic → English → Deutsch → … → Automatic.
                 let codes: Vec<&str> = std::iter::once("").chain(crate::strings::LANGUAGES.iter().map(|(c, _, _)| *c)).collect();

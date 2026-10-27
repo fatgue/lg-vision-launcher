@@ -96,6 +96,9 @@ pub enum Update {
     HomebrewInstall { app: String, state: InstallState },
     /// Installed version of every app (id, version).
     Versions(Vec<(String, String)>),
+    /// A newer Vision release on GitHub (None: Vision is up to date).
+    VisionRelease(Option<Package>),
+    VisionInstall(InstallState),
 }
 
 /// TiviOne's home-screen snapshot (see tivione/src/core/launcher.ts).
@@ -622,6 +625,8 @@ pub enum Request {
     Homebrew,
     HomebrewInstall(Package),
     HomebrewRemove(String),
+    /// Download, verify and install a Vision release, then restart Vision.
+    VisionUpdate(Package),
 }
 
 /// Normalises `listLaunchPoints` (LG's Home bar, already in the user's order), taking each

@@ -79,6 +79,10 @@ case "${1:-boot}" in
     ;;
   refresh)
     [ -f "$STATE/enabled" ] || exit 0
+    # Run from an updated package: keep the boot hook's copy current.
+    if [ "$0" != "$STATE/home.sh" ]; then
+      cp "$0" "$STATE/home.sh.new" && chmod 755 "$STATE/home.sh.new" && mv "$STATE/home.sh.new" "$STATE/home.sh"
+    fi
     unmount
     apply && stop_home && luna launch "{\"id\":\"$HOME_ID\"}"
     ;;

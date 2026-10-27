@@ -180,6 +180,7 @@ mod backend {
                 }),
                 Request::HomebrewRemove(app) => crate::installer::remove(app, sink.clone()),
                 Request::Homebrew => crate::installer::homebrew(data_dir.clone(), sink.clone()),
+                Request::VisionUpdate(package) => crate::installer::install(package, data_dir.clone(), sink.clone(), |_, state| Update::VisionInstall(state)),
                 Request::Pictures(release) => crate::installer::pictures(release, data_dir.clone(), sink.clone()),
                 Request::Wallpaper(path) => load_wallpaper(path, sink.clone()),
             }
@@ -245,6 +246,9 @@ mod backend {
                 }),
                 Request::HomebrewRemove(app) => crate::installer::remove(app, sink.clone()),
                 Request::Homebrew => crate::installer::homebrew(state.data_dir.clone(), sink.clone()),
+                Request::VisionUpdate(package) => {
+                    crate::installer::install(package, state.data_dir.clone(), sink.clone(), |_, state| Update::VisionInstall(state))
+                }
                 Request::Pictures(release) => crate::installer::pictures(release, state.data_dir.clone(), sink.clone()),
                 Request::Wallpaper(path) => load_wallpaper(path, sink.clone()),
                 Request::HomeTakeover(on) => {

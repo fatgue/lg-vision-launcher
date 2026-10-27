@@ -23,10 +23,18 @@ const PICTURE_H: usize = 540;
 pub const MAX_PICTURES: usize = 6;
 
 static MANIFEST_URL: OnceLock<String> = OnceLock::new();
+/// Vision's releases: the IPK and SHA256SUMS of the newest one (built by GitHub Actions).
+const VISION_RELEASES: &str = "https://api.github.com/repos/fatgue/lg-vision-launcher/releases/latest";
+static VISION_VERSION: OnceLock<String> = OnceLock::new();
 
 /// Another manifest address (debug flag `--releases`): a test server before a release is live.
 pub fn set_manifest(url: String) {
     let _ = MANIFEST_URL.set(url);
+}
+
+/// Another running version (debug flag `--vision-version`), to see the update offer.
+pub fn set_vision_version(version: String) {
+    let _ = VISION_VERSION.set(version);
 }
 
 /// Looks for the newest release; the answer arrives as `Update::Release`. `answered` is set
@@ -39,7 +47,65 @@ pub fn check(sink: Sink, answered: Arc<AtomicBool>) {
         }
         answered.store(release.is_some(), Ordering::Release);
         sink.send(Update::Release(release));
+        // Vision itself, from its GitHub releases. A failed check changes nothing.
+        match vision_release() {
+            Ok(package) => sink.send(Update::VisionRelease(package)),
+            Err(error) => log!("vision release: {error}"),
+        }
     });
+}
+
+fn vision_release() -> Result<Option<Package>, String> {
+    let agent = crate::net::agent();
+    let release = crate::net::get_json(&agent, VISION_RELEASES, &[])?;
+    let current = VISION_VERSION.get().map_or(env!("CARGO_PKG_VERSION"), String::as_str);
+    // Up to date: no need for the checksums.
+    if vision_package(&release, None, current)?.is_none() {
+        return Ok(None);
+    }
+    let (url, _) = asset(&release, "SHA256SUMS").ok_or("SHA256SUMS missing")?;
+    let sums = crate::net::get_bytes(&agent, &url, &[], 16 << 10)?;
+    vision_package(&release, Some(&String::from_utf8_lossy(&sums)), current)
+}
+
+/// A release's download address and size for one of its files.
+fn asset(release: &Value, name: &str) -> Option<(String, Option<u64>)> {
+    let asset = release.get("assets")?.as_array()?.iter().find(|a| a.get("name").and_then(Value::as_str) == Some(name))?;
+    let url = asset.get("browser_download_url")?.as_str()?;
+    url.starts_with("https://").then(|| (url.to_string(), asset.get("size").and_then(Value::as_u64)))
+}
+
+/// The package of a GitHub release newer than `current`, with its checksum from SHA256SUMS
+/// (`sums` None: only whether there is one; the checksum is left empty).
+fn vision_package(release: &Value, sums: Option<&str>, current: &str) -> Result<Option<Package>, String> {
+    let version = release.get("tag_name").and_then(Value::as_str).unwrap_or_default().trim_start_matches('v').to_string();
+    if version.is_empty() || !version.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return Err(format!("bad version {version:?}"));
+    }
+    if !model::version_newer(&version, current) || release.get("draft").and_then(Value::as_bool) == Some(true) {
+        return Ok(None);
+    }
+    let name = format!("{}_{version}_arm.ipk", crate::platform::APP_ID);
+    let (url, size) = asset(release, &name).ok_or_else(|| format!("{name} missing"))?;
+    let mut sha256 = [0u8; 32];
+    let Some(sums) = sums else {
+        return Ok(Some(Package { app: crate::platform::APP_ID.to_string(), version, url, sha256, size }));
+    };
+    let hex = sums
+        .lines()
+        .find_map(|line| {
+            let mut parts = line.split_whitespace();
+            let (hash, file) = (parts.next()?, parts.next()?);
+            (file.trim_start_matches('*') == name).then_some(hash)
+        })
+        .ok_or("no checksum")?;
+    if hex.len() != 64 {
+        return Err("bad checksum".into());
+    }
+    for (i, byte) in sha256.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(|_| "bad checksum")?;
+    }
+    Ok(Some(Package { app: crate::platform::APP_ID.to_string(), version, url, sha256, size: size.filter(|&s| s > 0 && s <= MAX_IPK) }))
 }
 
 fn fetch_release() -> Result<Release, String> {
@@ -136,6 +202,9 @@ pub fn install(package: Package, data_dir: PathBuf, sink: Sink, report: Report) 
             Ok(()) => {
                 log!("{} {} installed", package.app, package.version);
                 send(InstallState::Done);
+                if package.app == crate::platform::APP_ID {
+                    restart_vision();
+                }
             }
             Err(failure) => {
                 log!("{} install: {failure:?}", package.app);
@@ -355,6 +424,29 @@ pub fn homebrew(data_dir: PathBuf, sink: Sink) {
     });
 }
 
+/// After a Vision update: as Home the mount still holds the old executable, so home.sh (from the
+/// new package) mounts the new one and restarts Home; otherwise Vision starts again. Detached,
+/// because both end this process.
+#[cfg(all(target_os = "linux", target_arch = "arm"))]
+fn restart_vision() {
+    use crate::luna::Luna;
+    use serde_json::json;
+    const APP_DIR: &str = "/media/developer/apps/usr/palm/applications/com.vision.launcher";
+    let command = format!(
+        "(sleep 1; if [ -f /var/run/vision-home ]; then sh {APP_DIR}/home.sh refresh; \
+         else luna-send -n 1 luna://com.webos.applicationManager/launch '{{\"id\":\"com.vision.launcher\"}}'; fi) </dev/null >/dev/null 2>&1 &"
+    );
+    match Luna::connect().and_then(|mut luna| luna.call("luna://org.webosbrew.hbchannel.service/exec", &json!({ "command": command }))) {
+        Ok(_) => log!("vision update: restarting"),
+        Err(error) => log!("vision update: restart: {error}"),
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+fn restart_vision() {
+    log!("vision update (desktop): would restart");
+}
+
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
 fn install_package(_path: &Path) -> Result<(), InstallFailure> {
     log!("install (desktop): only on the TV");
@@ -364,5 +456,28 @@ fn install_package(_path: &Path) -> Result<(), InstallFailure> {
 fn spawn(name: &str, job: impl FnOnce() + Send + 'static) {
     if let Err(error) = std::thread::Builder::new().name(name.into()).spawn(job) {
         log!("{name}: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_a_newer_release_with_its_checksum() {
+        let release: Value = serde_json::json!({
+            "tag_name": "v0.2.2",
+            "assets": [
+                { "name": "com.vision.launcher_0.2.2_arm.ipk", "size": 3900000, "browser_download_url": "https://github.com/x/com.vision.launcher_0.2.2_arm.ipk" },
+                { "name": "SHA256SUMS", "size": 100, "browser_download_url": "https://github.com/x/SHA256SUMS" },
+            ],
+        });
+        let hash = "ab".repeat(32);
+        let sums = format!("{hash}  com.vision.launcher_0.2.2_arm.ipk\n");
+        let package = vision_package(&release, Some(&sums), "0.2.1").unwrap().unwrap();
+        assert_eq!((package.version.as_str(), package.size, package.sha256[0]), ("0.2.2", Some(3900000), 0xab));
+        assert_eq!(vision_package(&release, Some(&sums), "0.2.2").unwrap(), None);
+        assert!(vision_package(&release, None, "0.2.1").unwrap().is_some());
+        assert!(vision_package(&release, Some(""), "0.2.1").is_err());
     }
 }

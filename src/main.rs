@@ -121,6 +121,10 @@ fn run(started: Instant) -> Result<(), String> {
     if let Some(url) = args.iter().position(|a| a == "--releases").and_then(|i| args.get(i + 1)) {
         installer::set_manifest(url.clone());
     }
+    // --vision-version <v>: pretend to run this version (to see the update offer).
+    if let Some(version) = args.iter().position(|a| a == "--vision-version").and_then(|i| args.get(i + 1)) {
+        installer::set_vision_version(version.clone());
+    }
     let home_mode = runs_as_home();
     let exe_dir = if home_mode {
         PathBuf::from(INSTALL_DIR)
@@ -432,6 +436,8 @@ fn run(started: Instant) -> Result<(), String> {
                 Update::HomebrewIcon(icon) => home.add_brew_icon(icon, &renderer),
                 Update::HomebrewInstall { app, state } => home.set_brew_install(app, state),
                 Update::Versions(versions) => home.set_versions(versions),
+                Update::VisionRelease(package) => home.set_vision_release(package),
+                Update::VisionInstall(state) => home.set_vision_install(state),
                 Update::TvPair(key) => platform.send(Request::Launch {
                     app_id: model::TIVIONE_APP.into(),
                     params: Some(serde_json::json!({ "launcherPair": { "key": key } })),
@@ -574,6 +580,11 @@ fn dispatch(action: Action, io: &Io) -> bool {
             platform.send(Request::HomebrewInstall(package));
         }
         Some(Action::HomebrewRemove(app)) => platform.send(Request::HomebrewRemove(app)),
+        Some(Action::VisionUpdate(package)) => {
+            // The update restarts Vision: free the decoder first.
+            io.video.release();
+            platform.send(Request::VisionUpdate(package));
+        }
         Some(Action::Wallpaper(name)) => {
             let path = match name.as_str() {
                 "custom" => io.data_dir.join("wallpaper.jpg"),
