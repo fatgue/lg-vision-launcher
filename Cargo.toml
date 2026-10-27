@@ -1,6 +1,6 @@
 [package]
 name = "vision"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 publish = false
 description = "Vision: a fast native home launcher for rooted LG webOS TVs"
