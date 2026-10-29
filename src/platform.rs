@@ -117,15 +117,33 @@ mod backend {
     }
 
     fn sample_tv_settings() -> TvSettings {
-        let list = |items: &[&str]| items.iter().map(|s| s.to_string()).collect();
-        TvSettings {
-            picture_mode: "filmMaker".into(),
-            picture_modes: list(&["vivid", "normal", "eco", "cinema", "sports", "game", "filmMaker", "expert1", "expert2"]),
-            sound_mode: "standard".into(),
-            sound_modes: list(&["aiSoundPlus", "aiSound", "standard", "movie", "news", "sports", "music", "game"]),
-            brightness: 80,
-            sleep_timer: "off".into(),
+        let mut tv = TvSettings::default();
+        for (key, value) in [
+            ("picture.pictureMode", "filmMaker"),
+            ("picture.backlight", "80"),
+            ("picture.contrast", "85"),
+            ("picture.energySaving", "off"),
+            ("sound.soundMode", "standard"),
+            ("sound.soundOutput", "external_optical"),
+            ("time.sleepTimer", "off"),
+            ("time.automaticStandBy", "8"),
+            ("general.homeAutoLaunch", "off"),
+            ("option.quickStartMode", "off"),
+            ("other.uhdDeepColorHDMI1", "on"),
+            ("other.uhdDeepColorHDMI2", "on"),
+            ("other.uhdDeepColorHDMI3", "on"),
+            ("other.uhdDeepColorHDMI4", "off"),
+        ] {
+            tv.values.insert(key.into(), value.into());
         }
+        let list = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        tv.options.insert("picture.pictureMode".into(), list(&["vivid", "normal", "eco", "cinema", "sports", "game", "filmMaker", "expert1", "expert2"]));
+        tv.options.insert("picture.energySaving".into(), list(&["auto", "off", "min", "med", "max", "screen_off"]));
+        tv.options.insert("sound.soundMode".into(), list(&["aiSoundPlus", "aiSound", "standard", "movie", "news", "sports", "music", "game"]));
+        tv.options.insert("sound.soundOutput".into(), list(&["tv_speaker", "external_optical", "external_arc", "bt_soundbar"]));
+        tv.options.insert("time.sleepTimer".into(), list(&["off", "10", "20", "30", "60", "90", "120", "180", "240"]));
+        tv.options.insert("time.automaticStandBy".into(), list(&["0", "2", "4", "6", "8"]));
+        tv
     }
 
     pub fn run(requests: Receiver<Request>, sink: Sink, data_dir: PathBuf) {
@@ -332,26 +350,30 @@ mod backend {
     }
 
     fn tv_settings(luna: &mut Luna) -> Option<TvSettings> {
-        let get = |luna: &mut Luna, category: &str, keys: &[&str]| {
-            settings_call(luna, "getSystemSettings", &json!({ "category": category, "keys": keys })).and_then(|r| r.get("settings").cloned())
-        };
-        let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
-        let picture = get(luna, "picture", &["pictureMode", "backlight"])?;
-        let sound = get(luna, "sound", &["soundMode"]).unwrap_or_default();
-        let time = get(luna, "time", &["sleepTimer"]).unwrap_or_default();
-        let modes = |luna: &mut Luna, category: &str, key: &str| {
-            settings_call(luna, "getSystemSettingDesc", &json!({ "category": category, "keys": [key] }))
-                .map(|desc| model::setting_values(&desc, key))
-                .unwrap_or_default()
-        };
-        Some(TvSettings {
-            picture_mode: text(&picture, "pictureMode"),
-            picture_modes: modes(luna, "picture", "pictureMode"),
-            sound_mode: text(&sound, "soundMode"),
-            sound_modes: modes(luna, "sound", "soundMode"),
-            brightness: text(&picture, "backlight").parse().unwrap_or(0),
-            sleep_timer: Some(text(&time, "sleepTimer")).filter(|t| !t.is_empty()).unwrap_or_else(|| "off".into()),
-        })
+        let mut tv = TvSettings::default();
+        for (category, keys) in model::TV_READ {
+            let Some(settings) = settings_call(luna, "getSystemSettings", &json!({ "category": category, "keys": keys })).and_then(|r| r.get("settings").cloned()) else {
+                continue;
+            };
+            for key in keys {
+                let value = match settings.get(key) {
+                    Some(Value::String(text)) => text.clone(),
+                    Some(Value::Number(n)) => n.to_string(),
+                    _ => continue,
+                };
+                tv.values.insert(format!("{category}.{key}"), value);
+            }
+        }
+        if tv.values.is_empty() {
+            return None;
+        }
+        for name in model::TV_LISTS {
+            let (category, key) = name.split_once('.').unwrap_or((name, ""));
+            if let Some(desc) = settings_call(luna, "getSystemSettingDesc", &json!({ "category": category, "keys": [key] })) {
+                tv.options.insert(name.to_string(), model::setting_values(&desc, key));
+            }
+        }
+        Some(tv)
     }
 
     fn tv_control(luna: &mut Luna, control: &TvControl) {
@@ -361,10 +383,7 @@ mod backend {
             }
         };
         match control {
-            TvControl::PictureMode(mode) => set(luna, "picture", "pictureMode", mode),
-            TvControl::SoundMode(mode) => set(luna, "sound", "soundMode", mode),
-            TvControl::Brightness(value) => set(luna, "picture", "backlight", &value.to_string()),
-            TvControl::SleepTimer(minutes) => set(luna, "time", "sleepTimer", minutes),
+            TvControl::Set { category, key, value } => set(luna, category, key, value),
             TvControl::ScreenOff | TvControl::PowerOff => {
                 let method = if *control == TvControl::ScreenOff { "turnOffScreen" } else { "powerOff" };
                 let payload = if *control == TvControl::ScreenOff { json!({}) } else { json!({ "reason": "remoteKey" }) };

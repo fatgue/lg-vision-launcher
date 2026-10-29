@@ -5,6 +5,7 @@ mod control;
 mod glass;
 mod homebrew;
 mod nav;
+mod tv;
 mod overlays;
 
 use chrome::*;
@@ -361,6 +362,8 @@ enum SettingId {
     ClockStyle,
     /// Install the newer Vision release.
     VisionUpdate,
+    /// A row of Settings > TV (an index into `tv::TV_ROWS`).
+    Tv(usize),
     Info,
 }
 
@@ -372,6 +375,9 @@ struct SettingItem {
     on: Option<bool>,
     enabled: bool,
 }
+
+/// Settings > TV (the last section).
+const TV_SECTION: usize = 7;
 
 /// Something the Magic Remote pointer can hit, recorded while drawing.
 #[derive(Clone, Copy, PartialEq)]
@@ -1649,12 +1655,30 @@ impl Home {
             (names[4], rows),
             (names[5], appearance),
             (names[6], system),
+            (names[7], self.tv_items()),
         ]
     }
 
     fn settings_key(&mut self, key: Key) -> Option<Action> {
         let sections = self.settings_sections();
         let count = sections.get(self.settings_section).map_or(0, |(_, items)| items.len());
+        // Left/Right on a 0–100 TV setting changes it.
+        if self.settings_column == 1 && matches!(key, Key::Left | Key::Right) {
+            let id = sections.get(self.settings_section).and_then(|(_, items)| items.get(self.settings_row)).map(|item| item.id);
+            if let Some(row) = id.and_then(Home::tv_range) {
+                return self.tv_adjust(row, if key == Key::Left { -5 } else { 5 });
+            }
+        }
+        let before = self.settings_section;
+        let action = self.settings_move(key, count, sections);
+        // The TV's own settings load when their section gets focus.
+        if self.settings_section == TV_SECTION && (before != TV_SECTION || self.tv_settings.is_none()) && action.is_none() {
+            return Some(Action::TvSettings);
+        }
+        action
+    }
+
+    fn settings_move(&mut self, key: Key, count: usize, sections: Vec<(&'static str, Vec<SettingItem>)>) -> Option<Action> {
         match (key, self.settings_column) {
             (Key::Back, 0) => {
                 self.mode = Mode::Browse;
@@ -1746,6 +1770,7 @@ impl Home {
             SettingId::Motion => ui.reduced_motion = !ui.reduced_motion,
             SettingId::Preview => ui.preview = !ui.preview,
             SettingId::FreeMemory => ui.free_memory = !ui.free_memory,
+            SettingId::Tv(row) => return self.tv_change(row),
             SettingId::ClockStyle => ui.clock_style = if ui.clock_style == "inline" { "stacked" } else { "inline" }.to_string(),
             SettingId::VisionUpdate => {
                 let busy = matches!(self.vision_install, InstallState::Downloading(_) | InstallState::Installing | InstallState::Done);

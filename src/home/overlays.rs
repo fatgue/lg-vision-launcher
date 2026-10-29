@@ -3,8 +3,17 @@
 use super::glass::glass_surface;
 use super::*;
 
+/// Settings rows that fit on screen (Cinematic, Glass); longer lists scroll.
+const CINEMATIC_ROWS: usize = 8;
+const GLASS_ROWS: usize = 10;
+
+/// The first row to show so that `focus` stays in view.
+fn first_row(focus: usize, count: usize, fits: usize) -> usize {
+    focus.saturating_sub(fits - 1).min(count.saturating_sub(fits))
+}
+
 /// The symbol for each Settings section (Connections … System).
-const SECTION_ICONS: [char; 7] = [icon::LINK, icon::PARTLY_CLOUDY_DAY, icon::CLOCK, icon::HOME, icon::ROWS, icon::APPEARANCE, icon::SETTINGS];
+const SECTION_ICONS: [char; 8] = [icon::LINK, icon::PARTLY_CLOUDY_DAY, icon::CLOCK, icon::HOME, icon::ROWS, icon::APPEARANCE, icon::SETTINGS, icon::PICTURE];
 
 impl Home {
     pub(super) fn draw_menu(&self, r: &mut Renderer, text: &mut Text) {
@@ -381,8 +390,10 @@ impl Home {
         let list_w = panel.x + panel.w - 56.0 - list_x;
         let Some((_, items)) = sections.get(self.settings_section) else { return };
         let item_h = 84.0;
-        for (i, item) in items.iter().enumerate() {
-            let row = Rect::new(list_x, top + i as f32 * item_h, list_w, item_h - 12.0);
+        // Long lists scroll with the focus.
+        let first = first_row(self.settings_row, items.len(), CINEMATIC_ROWS);
+        for (i, item) in items.iter().enumerate().skip(first).take(CINEMATIC_ROWS) {
+            let row = Rect::new(list_x, top + (i - first) as f32 * item_h, list_w, item_h - 12.0);
             if item.enabled {
                 self.hits.borrow_mut().push((row, Target::SettingsRow(i)));
             }
@@ -410,7 +421,7 @@ impl Home {
             }
         }
         if self.settings_section == 3 {
-            let y = top + items.len() as f32 * item_h + 16.0;
+            let y = top + items.len().min(CINEMATIC_ROWS) as f32 * item_h + 16.0;
             for (i, line) in wrap(text, r, s.home_button_note, INPUT_SUB, list_w - 48.0).iter().enumerate() {
                 text.draw_top(r, line, list_x + 24.0, y + i as f32 * 30.0, INPUT_SUB, a(0.5));
             }
@@ -472,8 +483,9 @@ impl Home {
         };
         let focus = if in_items { self.settings_row } else { self.settings_section };
         let top = 170.0 + lift;
-        for (i, (label, value, enabled, more)) in rows.iter().enumerate() {
-            let row = Rect::new(x, top + i as f32 * pitch, width, row_h);
+        let first = first_row(focus, rows.len(), GLASS_ROWS);
+        for (i, (label, value, enabled, more)) in rows.iter().enumerate().skip(first).take(GLASS_ROWS) {
+            let row = Rect::new(x, top + (i - first) as f32 * pitch, width, row_h);
             if *enabled {
                 let target = if in_items { Target::SettingsRow(i) } else { Target::SettingsSection(i) };
                 self.hits.borrow_mut().push((row, target));
@@ -501,7 +513,7 @@ impl Home {
             }
         }
         if in_items && self.settings_section == 3 {
-            let y = top + rows.len() as f32 * pitch + 12.0;
+            let y = top + rows.len().min(GLASS_ROWS) as f32 * pitch + 12.0;
             for (i, line) in wrap(text, r, s.home_button_note, GLASS_SMALL, width - 64.0).iter().enumerate() {
                 text.draw_top(r, line, x + 32.0, y + i as f32 * 32.0, GLASS_SMALL, white.alpha(0.6 * open));
             }

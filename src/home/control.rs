@@ -5,6 +5,7 @@ use super::glass::glass_surface;
 use super::*;
 use crate::model::{TvControl, TvSettings};
 
+
 /// Round buttons at the top right: their centres (Inputs, Control Center) and diameter.
 pub(super) const BUTTONS: [(f32, f32); 2] = [(1664.0, 100.0), (1750.0, 100.0)];
 pub(super) const BUTTON_D: f32 = 72.0;
@@ -37,8 +38,6 @@ const ROWS: [&[Item]; 4] = [
     &[Item::ScreenOff, Item::Power, Item::Wallpaper, Item::Settings],
     &[Item::Brightness],
 ];
-
-const SLEEP: [&str; 9] = ["off", "10", "20", "30", "60", "90", "120", "180", "240"];
 
 fn item_at(index: usize) -> (usize, usize, Item) {
     let mut i = index;
@@ -191,12 +190,7 @@ impl Home {
         match key {
             Key::Up if row > 0 => self.mode = Mode::Control(index_of(row - 1, nearest(row - 1))),
             Key::Down if row + 1 < ROWS.len() => self.mode = Mode::Control(index_of(row + 1, nearest(row + 1))),
-            Key::Left | Key::Right if item == Item::Brightness => {
-                let tv = self.tv_settings.as_mut()?;
-                let step: i32 = if key == Key::Left { -5 } else { 5 };
-                tv.brightness = (tv.brightness as i32 + step).clamp(0, 100) as u32;
-                return Some(Action::TvControl(TvControl::Brightness(tv.brightness)));
-            }
+            Key::Left | Key::Right if item == Item::Brightness => return self.tv_adjust(3, if key == Key::Left { -5 } else { 5 }),
             Key::Left if column > 0 => self.mode = Mode::Control(focus - 1),
             Key::Right if column + 1 < ROWS[row].len() => self.mode = Mode::Control(focus + 1),
             Key::Back => self.mode = Mode::Browse,
@@ -207,27 +201,11 @@ impl Home {
     }
 
     fn control_ok(&mut self, item: Item) -> Option<Action> {
-        let next = |list: &[String], current: &str| -> Option<String> {
-            let at = list.iter().position(|m| m == current).map_or(0, |i| i + 1);
-            list.get(at % list.len().max(1)).cloned()
-        };
+        // The same rows as Settings > TV (super::tv::TV_ROWS).
         match item {
-            Item::Sound => {
-                let tv = self.tv_settings.as_mut()?;
-                tv.sound_mode = next(&tv.sound_modes, &tv.sound_mode)?;
-                Some(Action::TvControl(TvControl::SoundMode(tv.sound_mode.clone())))
-            }
-            Item::Picture => {
-                let tv = self.tv_settings.as_mut()?;
-                tv.picture_mode = next(&tv.picture_modes, &tv.picture_mode)?;
-                Some(Action::TvControl(TvControl::PictureMode(tv.picture_mode.clone())))
-            }
-            Item::Sleep => {
-                let tv = self.tv_settings.as_mut()?;
-                let list: Vec<String> = SLEEP.iter().map(|s| s.to_string()).collect();
-                tv.sleep_timer = next(&list, &tv.sleep_timer)?;
-                Some(Action::TvControl(TvControl::SleepTimer(tv.sleep_timer.clone())))
-            }
+            Item::Sound => self.tv_change(10),
+            Item::Picture => self.tv_change(2),
+            Item::Sleep => self.tv_change(12),
             Item::ScreenOff => {
                 self.mode = Mode::Browse;
                 Some(Action::TvControl(TvControl::ScreenOff))
@@ -268,7 +246,8 @@ impl Home {
         let dark = Rgba::hex(0x1C1C1E);
         r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, Rgba::hex(0).alpha(0.35 * open));
         let tv = self.tv_settings.as_ref();
-        let dash = || "–".to_string();
+        let value = |key: &str| tv.and_then(|t| t.get(key)).map_or_else(|| "–".to_string(), |v| self.tv_value(key, v));
+        let brightness = tv.and_then(|t| t.get("picture.backlight")).and_then(|v| v.parse::<f32>().ok());
         for index in 0..ROWS.iter().map(|r| r.len()).sum() {
             let (row, column, item) = item_at(index);
             let rect = item_rect(row, column).offset(0.0, -12.0 * (1.0 - open));
@@ -285,19 +264,15 @@ impl Home {
             }
             let color = if focused { dark } else { white };
             let (ch, title, value) = match item {
-                Item::Sound => (icon::SOUND, s.sound, tv.map_or_else(dash, |t| crate::strings::sound_mode_name(&t.sound_mode))),
-                Item::Picture => (icon::PICTURE, s.picture, tv.map_or_else(dash, |t| crate::strings::picture_mode_name(&t.picture_mode))),
+                Item::Sound => (icon::SOUND, s.sound, value("sound.soundMode")),
+                Item::Picture => (icon::PICTURE, s.picture, value("picture.pictureMode")),
                 Item::Theme => (icon::THEME, s.theme, self.look.name().to_string()),
-                Item::Sleep => (
-                    icon::TIMER,
-                    s.sleep_timer,
-                    tv.map_or_else(dash, |t| if t.sleep_timer == "off" { s.off.to_string() } else { s.minutes.replace("{n}", &t.sleep_timer) }),
-                ),
+                Item::Sleep => (icon::TIMER, s.sleep_timer, value("time.sleepTimer")),
                 Item::ScreenOff => (icon::SCREEN_OFF, s.screen_off, String::new()),
                 Item::Power => (icon::POWER, s.power_off, String::new()),
                 Item::Wallpaper => (icon::WALLPAPER, s.wallpaper, String::new()),
                 Item::Settings => (icon::SETTINGS, s.settings, String::new()),
-                Item::Brightness => (icon::BRIGHTNESS, s.brightness, tv.map_or_else(dash, |t| t.brightness.to_string())),
+                Item::Brightness => (icon::BRIGHTNESS, s.brightness, value("picture.backlight")),
             };
             match ROWS[row].len() {
                 // Circles: the icon alone (its name shows under the focused one).
@@ -310,8 +285,8 @@ impl Home {
                 }
                 1 => {
                     // The brightness bar: filled to the value.
-                    if let Some(t) = tv {
-                        let fill = Rect::new(rect.x, rect.y, (rect.w * t.brightness as f32 / 100.0).max(rect.h), rect.h);
+                    if let Some(level) = brightness {
+                        let fill = Rect::new(rect.x, rect.y, (rect.w * level / 100.0).max(rect.h), rect.h);
                         r.rect(fill, radius, if focused { dark.alpha(0.12 * open) } else { white.alpha(0.18 * open) });
                     }
                     text.icon(r, ch, rect.x + 50.0, rect.y + rect.h * 0.5, ICON, color.alpha(open));

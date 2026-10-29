@@ -146,6 +146,9 @@ features; Vision only shows what TiviOne shares with it, and only after you agre
   - Rows: show or hide each row
   - Appearance: theme, wallpaper and a photo from your phone (Glass), ambient light (Cinematic), motion, live preview
   - System: Vision update (when there is one), language, closing unused apps when memory is low (as Home), reload app images, version
+  - TV: the TV's own settings: Home when the TV turns on, Quick Start+, picture mode, brightness and contrast
+    (Left / Right), energy saving, Ultra HD Deep Colour per HDMI input, sound mode and output, sleep timer, auto power
+    off, and a way into all of LG's settings. Picture settings apply to the current input and signal, as in LG's menu.
 
 ## Vision as Home
 

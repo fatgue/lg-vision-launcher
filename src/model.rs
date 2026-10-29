@@ -649,26 +649,38 @@ pub enum Request {
     TvControl(TvControl),
 }
 
-/// The TV settings the Control Center shows. Picture settings are per input and signal
-/// (SDR, HDR, Dolby Vision): the modes listed are the ones for what is on screen now.
+/// The TV settings Vision shows (Control Center, Settings > TV), by "category.key". Picture
+/// settings are per input and signal (SDR, HDR, Dolby Vision): what is read, and the modes
+/// offered, are the ones for what is on screen now.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TvSettings {
-    pub picture_mode: String,
-    pub picture_modes: Vec<String>,
-    pub sound_mode: String,
-    pub sound_modes: Vec<String>,
-    /// OLED light (or backlight), 0–100.
-    pub brightness: u32,
-    /// "off" or minutes.
-    pub sleep_timer: String,
+    pub values: std::collections::HashMap<String, String>,
+    /// The values a list setting allows now.
+    pub options: std::collections::HashMap<String, Vec<String>>,
 }
+
+impl TvSettings {
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
+    }
+}
+
+/// What Vision reads, by settings category.
+pub const TV_READ: [(&str, &[&str]); 6] = [
+    ("picture", &["pictureMode", "backlight", "contrast", "energySaving"]),
+    ("sound", &["soundMode", "soundOutput"]),
+    ("time", &["sleepTimer", "automaticStandBy"]),
+    ("general", &["homeAutoLaunch"]),
+    ("option", &["quickStartMode"]),
+    ("other", &["uhdDeepColorHDMI1", "uhdDeepColorHDMI2", "uhdDeepColorHDMI3", "uhdDeepColorHDMI4"]),
+];
+
+/// List settings whose allowed values Vision asks for.
+pub const TV_LISTS: [&str; 6] = ["picture.pictureMode", "picture.energySaving", "sound.soundMode", "sound.soundOutput", "time.sleepTimer", "time.automaticStandBy"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TvControl {
-    PictureMode(String),
-    SoundMode(String),
-    Brightness(u32),
-    SleepTimer(String),
+    Set { category: String, key: String, value: String },
     ScreenOff,
     PowerOff,
 }
