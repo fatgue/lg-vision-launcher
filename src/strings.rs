@@ -186,6 +186,18 @@ strings! {
     vision_update_available: &'static str,
     vision_update_notice: &'static str,
     vision_restarting: &'static str,
+    sound: &'static str,
+    picture: &'static str,
+    sleep_timer: &'static str,
+    brightness: &'static str,
+    screen_off: &'static str,
+    power_off: &'static str,
+    minutes: &'static str,
+    clock_style: &'static str,
+    clock_inline: &'static str,
+    clock_stacked: &'static str,
+    /// What each Settings section is for (Glass shows it under the section's symbol).
+    section_about: [&'static str; 7],
     ip_address: &'static str,
     launcher: &'static str,
     lg_home: &'static str,
@@ -217,6 +229,11 @@ strings! {
 }
 
 impl Strings {
+    /// Short weekday name, Monday = 0.
+    pub fn day_short(&self, weekday: usize) -> &'static str {
+        self.days[weekday % 7]
+    }
+
     /// Short description for a WMO weather code.
     pub fn weather(&self, code: u32) -> &'static str {
         self.weather[match code {
@@ -402,6 +419,17 @@ pub static EN: Strings = Strings {
     vision_update_available: "Version {v}: press OK to install",
     vision_update_notice: "Vision {v} is available",
     vision_restarting: "Restarting…",
+    sound: "Sound",
+    picture: "Picture",
+    sleep_timer: "Sleep timer",
+    brightness: "Brightness",
+    screen_off: "Screen off",
+    power_off: "Turn off",
+    minutes: "{n} min",
+    clock_style: "Clock style",
+    clock_inline: "One line",
+    clock_stacked: "Large with forecast",
+    section_about: ["Home Assistant, Plex, TiviOne and the tiles on Home.", "Whether to show the weather, where and in which unit.", "The time format, the date and the clock style.", "What the remote's Home button opens.", "Which rows Home shows.", "Theme, wallpaper, motion and the live preview.", "Updates, language, memory, images and the version."],
     ip_address: "IP address",
     launcher: "Launcher",
     lg_home: "LG Home",
@@ -591,6 +619,17 @@ pub static DE: Strings = Strings {
     vision_update_available: "Version {v}: OK installiert",
     vision_update_notice: "Vision {v} ist verfügbar",
     vision_restarting: "Startet neu …",
+    sound: "Ton",
+    picture: "Bild",
+    sleep_timer: "Sleep-Timer",
+    brightness: "Helligkeit",
+    screen_off: "Bildschirm aus",
+    power_off: "Ausschalten",
+    minutes: "{n} Min.",
+    clock_style: "Uhr-Stil",
+    clock_inline: "Einzeilig",
+    clock_stacked: "Groß mit Vorhersage",
+    section_about: ["Home Assistant, Plex, TiviOne und die Kacheln auf Home.", "Ob das Wetter erscheint, für welchen Ort und in welcher Einheit.", "Zeitformat, Datum und Uhr-Stil.", "Was die Home-Taste der Fernbedienung öffnet.", "Welche Reihen Home zeigt.", "Theme, Hintergrund, Bewegung und Live-Vorschau.", "Updates, Sprache, Speicher, Bilder und Version."],
     ip_address: "IP-Adresse",
     launcher: "Launcher",
     lg_home: "LG Home",
@@ -780,6 +819,17 @@ pub static FR: Strings = Strings {
     vision_update_available: "Version {v} : OK pour installer",
     vision_update_notice: "Vision {v} est disponible",
     vision_restarting: "Redémarrage…",
+    sound: "Son",
+    picture: "Image",
+    sleep_timer: "Mise en veille",
+    brightness: "Luminosité",
+    screen_off: "Écran éteint",
+    power_off: "Éteindre",
+    minutes: "{n} min",
+    clock_style: "Style de l’horloge",
+    clock_inline: "Sur une ligne",
+    clock_stacked: "Grande, avec prévisions",
+    section_about: ["Home Assistant, Plex, TiviOne et les tuiles de l’accueil.", "La météo : l’afficher, pour quel lieu et dans quelle unité.", "Le format de l’heure, la date et le style de l’horloge.", "Ce qu’ouvre la touche Home de la télécommande.", "Les rangées affichées sur l’accueil.", "Thème, fond d’écran, animations et aperçu en direct.", "Mises à jour, langue, mémoire, images et version."],
     ip_address: "Adresse IP",
     launcher: "Lanceur",
     lg_home: "LG Home",
@@ -969,6 +1019,17 @@ pub static ES: Strings = Strings {
     vision_update_available: "Versión {v}: OK para instalar",
     vision_update_notice: "Vision {v} está disponible",
     vision_restarting: "Reiniciando…",
+    sound: "Sonido",
+    picture: "Imagen",
+    sleep_timer: "Temporizador",
+    brightness: "Brillo",
+    screen_off: "Apagar pantalla",
+    power_off: "Apagar",
+    minutes: "{n} min",
+    clock_style: "Estilo del reloj",
+    clock_inline: "En una línea",
+    clock_stacked: "Grande, con previsión",
+    section_about: ["Home Assistant, Plex, TiviOne y los mosaicos de inicio.", "Si se muestra el tiempo, de qué lugar y en qué unidad.", "El formato de hora, la fecha y el estilo del reloj.", "Qué abre el botón Home del mando.", "Qué filas muestra el inicio.", "Tema, fondo, movimiento y vista previa en directo.", "Actualizaciones, idioma, memoria, imágenes y versión."],
     ip_address: "Dirección IP",
     launcher: "Lanzador",
     lg_home: "LG Home",
@@ -1158,6 +1219,17 @@ pub static IT: Strings = Strings {
     vision_update_available: "Versione {v}: OK per installare",
     vision_update_notice: "Vision {v} è disponibile",
     vision_restarting: "Riavvio…",
+    sound: "Audio",
+    picture: "Immagine",
+    sleep_timer: "Timer di spegnimento",
+    brightness: "Luminosità",
+    screen_off: "Spegni schermo",
+    power_off: "Spegni",
+    minutes: "{n} min",
+    clock_style: "Stile orologio",
+    clock_inline: "Su una riga",
+    clock_stacked: "Grande, con previsioni",
+    section_about: ["Home Assistant, Plex, TiviOne e i riquadri della Home.", "Se mostrare il meteo, per quale luogo e in quale unità.", "Il formato dell’ora, la data e lo stile dell’orologio.", "Cosa apre il tasto Home del telecomando.", "Quali righe mostra la Home.", "Tema, sfondo, animazioni e anteprima dal vivo.", "Aggiornamenti, lingua, memoria, immagini e versione."],
     ip_address: "Indirizzo IP",
     launcher: "Launcher",
     lg_home: "LG Home",
@@ -1347,6 +1419,17 @@ pub static TR: Strings = Strings {
     vision_update_available: "Sürüm {v}: yüklemek için OK",
     vision_update_notice: "Vision {v} çıktı",
     vision_restarting: "Yeniden başlatılıyor…",
+    sound: "Ses",
+    picture: "Görüntü",
+    sleep_timer: "Uyku zamanlayıcı",
+    brightness: "Parlaklık",
+    screen_off: "Ekranı kapat",
+    power_off: "Kapat",
+    minutes: "{n} dk",
+    clock_style: "Saat stili",
+    clock_inline: "Tek satır",
+    clock_stacked: "Büyük, tahminli",
+    section_about: ["Home Assistant, Plex, TiviOne ve ana ekran kutucukları.", "Hava durumunun gösterilip gösterilmeyeceği, konumu ve birimi.", "Saat biçimi, tarih ve saat stili.", "Kumandanın Home tuşunun açtığı ekran.", "Ana ekranda hangi satırların görüneceği.", "Tema, duvar kâğıdı, hareket ve canlı önizleme.", "Güncellemeler, dil, bellek, görseller ve sürüm."],
     ip_address: "IP adresi",
     launcher: "Başlatıcı",
     lg_home: "LG Home",
@@ -1422,4 +1505,41 @@ pub fn charset(strings: &Strings) -> String {
         all.push_str(name);
     }
     all
+}
+
+/// LG's picture modes by their settings value (shown as LG names them, in English).
+pub fn picture_mode_name(value: &str) -> String {
+    let base = value.trim_start_matches("dolbyHdr").trim_start_matches("hdr");
+    let name = match base.to_ascii_lowercase().as_str() {
+        "vivid" => "Vivid",
+        "normal" | "standard" => "Standard",
+        "eco" => "Eco",
+        "cinema" => "Cinema",
+        "cinemabright" => "Cinema Home",
+        "sports" => "Sports",
+        "game" => "Game",
+        "photo" => "Photo",
+        "effect" => "HDR Effect",
+        "filmmaker" => "Filmmaker",
+        "expert1" => "Expert (bright)",
+        "expert2" => "Expert (dark)",
+        _ => return value.to_string(),
+    };
+    name.to_string()
+}
+
+/// LG's sound modes by their settings value.
+pub fn sound_mode_name(value: &str) -> String {
+    match value {
+        "aiSoundPlus" => "AI Sound Pro",
+        "aiSound" => "AI Sound",
+        "standard" => "Standard",
+        "movie" => "Cinema",
+        "news" => "Clear Voice",
+        "sports" => "Sports",
+        "music" => "Music",
+        "game" => "Game",
+        other => return other.to_string(),
+    }
+    .to_string()
 }

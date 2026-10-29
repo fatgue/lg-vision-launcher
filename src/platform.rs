@@ -73,7 +73,7 @@ fn save_prefs(prefs: &storage::Prefs, data_dir: &std::path::Path) {
 mod backend {
     //! Desktop preview: fixed sample inventory, never touches TV services.
     use super::*;
-    use crate::model::{App, Input, MediaItem, Notice, Programme, TvCatchup, TvChannel, TvFeed, TvReminder};
+    use crate::model::{App, Input, MediaItem, Notice, Programme, TvCatchup, TvChannel, TvFeed, TvReminder, TvSettings};
 
     /// Plex "continue watching" for the preview.
     fn sample_media() -> Vec<MediaItem> {
@@ -114,6 +114,18 @@ mod backend {
         feed.catchup = vec![TvCatchup { channel: 4, title: "Elephants Dream".into(), start: hour - 3_600_000, end: hour - 1_800_000 }];
         feed.reminders = vec![TvReminder { channel: 3, title: "Cosmos Laundromat".into(), start: hour + 3_600_000 }];
         feed
+    }
+
+    fn sample_tv_settings() -> TvSettings {
+        let list = |items: &[&str]| items.iter().map(|s| s.to_string()).collect();
+        TvSettings {
+            picture_mode: "filmMaker".into(),
+            picture_modes: list(&["vivid", "normal", "eco", "cinema", "sports", "game", "filmMaker", "expert1", "expert2"]),
+            sound_mode: "standard".into(),
+            sound_modes: list(&["aiSoundPlus", "aiSound", "standard", "movie", "news", "sports", "music", "game"]),
+            brightness: 80,
+            sleep_timer: "off".into(),
+        }
     }
 
     pub fn run(requests: Receiver<Request>, sink: Sink, data_dir: PathBuf) {
@@ -159,6 +171,7 @@ mod backend {
                                 label: label.to_string(),
                                 app_id: format!("com.webos.app.{}", id.to_lowercase().replace('_', "")),
                                 connected: *connected,
+                                device: None,
                             })
                             .collect(),
                     ));
@@ -181,6 +194,8 @@ mod backend {
                 Request::HomebrewRemove(app) => crate::installer::remove(app, sink.clone()),
                 Request::Homebrew => crate::installer::homebrew(data_dir.clone(), sink.clone()),
                 Request::VisionUpdate(package) => crate::installer::install(package, data_dir.clone(), sink.clone(), |_, state| Update::VisionInstall(state)),
+                Request::TvSettings => sink.send(Update::TvSettings(Some(sample_tv_settings()))),
+                Request::TvControl(control) => log!("preview: tv control {control:?}"),
                 Request::Pictures(release) => crate::installer::pictures(release, data_dir.clone(), sink.clone()),
                 Request::Wallpaper(path) => load_wallpaper(path, sink.clone()),
             }
@@ -192,7 +207,7 @@ mod backend {
 mod backend {
     use super::*;
     use crate::luna::Luna;
-    use crate::model::{self, App, Notice};
+    use crate::model::{self, App, Notice, TvControl, TvSettings};
     use serde_json::{json, Value};
     use std::collections::HashSet;
     use std::path::Path;
@@ -249,6 +264,14 @@ mod backend {
                 Request::VisionUpdate(package) => {
                     crate::installer::install(package, state.data_dir.clone(), sink.clone(), |_, state| Update::VisionInstall(state))
                 }
+                Request::TvSettings => sink.send(Update::TvSettings(tv_settings(&mut luna))),
+                Request::TvControl(control) => {
+                    tv_control(&mut luna, &control);
+                    // What the TV made of it (a mode may not apply to this signal).
+                    if !matches!(control, TvControl::ScreenOff | TvControl::PowerOff) {
+                        sink.send(Update::TvSettings(tv_settings(&mut luna)));
+                    }
+                }
                 Request::Pictures(release) => crate::installer::pictures(release, state.data_dir.clone(), sink.clone()),
                 Request::Wallpaper(path) => load_wallpaper(path, sink.clone()),
                 Request::HomeTakeover(on) => {
@@ -294,6 +317,65 @@ mod backend {
             return Err(format!("hbchannel exec: {reply}"));
         }
         Ok(reply.get("stdoutString").and_then(Value::as_str).unwrap_or("").to_string())
+    }
+
+    /// A settingsservice call, directly or (without the permission) as root.
+    fn settings_call(luna: &mut Luna, method: &str, payload: &Value) -> Option<Value> {
+        let uri = format!("luna://com.webos.settingsservice/{method}");
+        if let Ok(reply) = luna.call(&uri, payload) {
+            if reply.get("returnValue").and_then(Value::as_bool) == Some(true) {
+                return Some(reply);
+            }
+        }
+        let stdout = exec(luna, &format!("luna-send -n 1 -w 4000 {uri} '{payload}'")).ok()?;
+        serde_json::from_str(stdout.trim()).ok()
+    }
+
+    fn tv_settings(luna: &mut Luna) -> Option<TvSettings> {
+        let get = |luna: &mut Luna, category: &str, keys: &[&str]| {
+            settings_call(luna, "getSystemSettings", &json!({ "category": category, "keys": keys })).and_then(|r| r.get("settings").cloned())
+        };
+        let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+        let picture = get(luna, "picture", &["pictureMode", "backlight"])?;
+        let sound = get(luna, "sound", &["soundMode"]).unwrap_or_default();
+        let time = get(luna, "time", &["sleepTimer"]).unwrap_or_default();
+        let modes = |luna: &mut Luna, category: &str, key: &str| {
+            settings_call(luna, "getSystemSettingDesc", &json!({ "category": category, "keys": [key] }))
+                .map(|desc| model::setting_values(&desc, key))
+                .unwrap_or_default()
+        };
+        Some(TvSettings {
+            picture_mode: text(&picture, "pictureMode"),
+            picture_modes: modes(luna, "picture", "pictureMode"),
+            sound_mode: text(&sound, "soundMode"),
+            sound_modes: modes(luna, "sound", "soundMode"),
+            brightness: text(&picture, "backlight").parse().unwrap_or(0),
+            sleep_timer: Some(text(&time, "sleepTimer")).filter(|t| !t.is_empty()).unwrap_or_else(|| "off".into()),
+        })
+    }
+
+    fn tv_control(luna: &mut Luna, control: &TvControl) {
+        let set = |luna: &mut Luna, category: &str, key: &str, value: &str| {
+            if settings_call(luna, "setSystemSettings", &json!({ "category": category, "settings": { key: value } })).is_none() {
+                log!("tv control: {category}.{key} = {value} failed");
+            }
+        };
+        match control {
+            TvControl::PictureMode(mode) => set(luna, "picture", "pictureMode", mode),
+            TvControl::SoundMode(mode) => set(luna, "sound", "soundMode", mode),
+            TvControl::Brightness(value) => set(luna, "picture", "backlight", &value.to_string()),
+            TvControl::SleepTimer(minutes) => set(luna, "time", "sleepTimer", minutes),
+            TvControl::ScreenOff | TvControl::PowerOff => {
+                let method = if *control == TvControl::ScreenOff { "turnOffScreen" } else { "powerOff" };
+                let payload = if *control == TvControl::ScreenOff { json!({}) } else { json!({ "reason": "remoteKey" }) };
+                let uri = format!("luna://com.webos.service.tvpower/power/{method}");
+                if luna.call(&uri, &payload).ok().and_then(|r| r.get("returnValue").and_then(Value::as_bool)) != Some(true) {
+                    if let Err(error) = exec(luna, &format!("luna-send -n 1 -w 4000 {uri} '{payload}'")) {
+                        log!("tv control: {method}: {error}");
+                    }
+                }
+            }
+        }
     }
 
     fn refresh(luna: &mut Luna, sink: &Sink, state: &mut State) {

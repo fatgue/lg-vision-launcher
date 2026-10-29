@@ -302,8 +302,10 @@ pub(super) fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: 
         Kind::Input { connected } => {
             let x = rect.x + 52.0;
             text.draw(r, &tile.title, x, rect.y + rect.h * 0.5 - 2.0, INPUT_LABEL, TEXT.alpha(alpha));
-            let sub = if connected { s.connected } else { s.no_signal };
-            text.draw(r, sub, x, rect.y + rect.h * 0.5 + 26.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
+            // The device's own name when it gives one.
+            let sub = if !connected { s.no_signal } else if tile.detail.is_empty() { s.connected } else { &tile.detail };
+            let sub = clip(text, r, sub, INPUT_SUB, rect.x + rect.w - 16.0 - x);
+            text.draw(r, &sub, x, rect.y + rect.h * 0.5 + 26.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));
         }
         Kind::Channel { .. } => {
             let (x, w) = (rect.x + 24.0, rect.w - 48.0);

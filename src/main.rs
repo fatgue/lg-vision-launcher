@@ -202,6 +202,10 @@ fn run(started: Instant) -> Result<(), String> {
     let free_memory = prefs.ui.free_memory;
     let mut home = Home::new(&renderer, prefs, look);
     home.set_home_mode(home_mode);
+    // --sample-weather: weather and a forecast on the desktop (no location there).
+    if args.iter().any(|a| a == "--sample-weather") {
+        home.set_weather(Some(sample_weather()));
+    }
     let t_home = started.elapsed();
     let bus = if home_mode {
         let bus = register_home(sdl.waker())?;
@@ -438,6 +442,7 @@ fn run(started: Instant) -> Result<(), String> {
                 Update::Versions(versions) => home.set_versions(versions),
                 Update::VisionRelease(package) => home.set_vision_release(package),
                 Update::VisionInstall(state) => home.set_vision_install(state),
+                Update::TvSettings(settings) => home.set_tv_settings(settings),
                 Update::TvPair(key) => platform.send(Request::Launch {
                     app_id: model::TIVIONE_APP.into(),
                     params: Some(serde_json::json!({ "launcherPair": { "key": key } })),
@@ -580,6 +585,8 @@ fn dispatch(action: Action, io: &Io) -> bool {
             platform.send(Request::HomebrewInstall(package));
         }
         Some(Action::HomebrewRemove(app)) => platform.send(Request::HomebrewRemove(app)),
+        Some(Action::TvSettings) => platform.send(Request::TvSettings),
+        Some(Action::TvControl(control)) => platform.send(Request::TvControl(control)),
         Some(Action::VisionUpdate(package)) => {
             // The update restarts Vision: free the decoder first.
             io.video.release();
@@ -831,5 +838,17 @@ impl Perf {
             );
             *self = Perf::default();
         }
+    }
+}
+
+/// Weather for desktop previews (`--sample-weather`).
+fn sample_weather() -> model::Weather {
+    let day = |code, max, min| model::Forecast { code, max, min };
+    model::Weather {
+        temperature: 11.0,
+        code: 61,
+        is_day: true,
+        days: [day(61, 12.0, 6.0), day(3, 13.0, 7.0), day(2, 15.0, 8.0), day(0, 17.0, 9.0), day(80, 14.0, 9.0), day(71, 4.0, -1.0)],
+        day_count: 6,
     }
 }

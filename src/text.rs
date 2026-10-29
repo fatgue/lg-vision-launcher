@@ -20,6 +20,8 @@ pub enum Weight {
     Regular = 0,
     Medium = 1,
     SemiBold = 2,
+    /// The icon font (Material Symbols): `theme::icon` characters.
+    Icon = 3,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -113,7 +115,7 @@ impl Prewarmed {
 /// or reads back the atlas an earlier start packed for the same jobs from `cache`.
 pub fn prewarm(
     fonts_dir: PathBuf,
-    font_files: [&'static str; 3],
+    font_files: [&'static str; 4],
     jobs: Vec<(Style, String)>,
     cache: Option<PathBuf>,
 ) -> JoinHandle<Result<Prewarmed, String>> {
@@ -189,7 +191,8 @@ fn read_cache(path: &std::path::Path, key: u64) -> Option<Packed> {
         let weight = match bytes[at] {
             0 => Weight::Regular,
             1 => Weight::Medium,
-            _ => Weight::SemiBold,
+            2 => Weight::SemiBold,
+            _ => Weight::Icon,
         };
         placed.push(Placed {
             key: Key { weight, size: u16_at(at + 1), ch: char::from_u32(u32_at(at + 3))? },
@@ -432,6 +435,15 @@ impl Text {
             previous = Some(ch);
         }
         pen - x
+    }
+
+    /// Draws one icon (or any character) centred on (cx, cy) by its visible shape.
+    pub fn icon(&mut self, renderer: &mut Renderer, ch: char, cx: f32, cy: f32, style: Style, color: Rgba) {
+        let glyph = self.glyph(renderer, Key::new(style, ch));
+        if glyph.w > 0.0 {
+            let rect = Rect::new((cx - glyph.w * 0.5).round(), (cy - glyph.h * 0.5).round(), glyph.w, glyph.h);
+            renderer.glyph(self.atlas, rect, glyph.uv, color);
+        }
     }
 
     /// Draws text by its top edge (CSS-like placement).

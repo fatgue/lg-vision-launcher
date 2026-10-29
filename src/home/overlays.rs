@@ -1,7 +1,10 @@
 //! Overlays drawn over the home screen: menu, setup panels, offer, store page, settings,
 //! entity picker, digit entry and notices.
-use super::cinematic::draw_gear_at;
+use super::glass::glass_surface;
 use super::*;
+
+/// The symbol for each Settings section (Connections … System).
+const SECTION_ICONS: [char; 7] = [icon::LINK, icon::PARTLY_CLOUDY_DAY, icon::CLOCK, icon::HOME, icon::ROWS, icon::APPEARANCE, icon::SETTINGS];
 
 impl Home {
     pub(super) fn draw_menu(&self, r: &mut Renderer, text: &mut Text) {
@@ -414,29 +417,44 @@ impl Home {
         }
     }
 
-    /// Settings like tvOS: full screen, a large symbol on the left, one list on the right that
-    /// shows the sections or, once one is opened, its items. The focused row turns white.
+    /// Settings in glass: the blurred wallpaper behind everything, a large glass card with the
+    /// section's symbol and what it is for on the left, and on the right one list of glass rows
+    /// that shows the sections or, once one is opened, its items. The focused row turns white.
     fn draw_settings_glass(&self, r: &mut Renderer, text: &mut Text, open: f32) {
         let s = self.strings;
         let white = Rgba::hex(0xFFFFFF);
-        let a = |v: f32| white.alpha(v * open);
-        r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, GLASS_BG.alpha(open));
+        let dark = Rgba::hex(0x1C1C1E);
+        let screen = Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H);
+        match self.wallpaper {
+            Some((_, blur)) => {
+                r.image(blur, screen, [0.0, 0.0, 1.0, 1.0], 0.0, white.alpha(open));
+                r.rect(screen, 0.0, Rgba::hex(0).alpha(0.3 * open));
+            }
+            None => r.rect(screen, 0.0, GLASS_BG.alpha(open)),
+        }
         let sections = self.settings_sections();
         let Some((section, items)) = sections.get(self.settings_section) else { return };
         let in_items = self.settings_column == 1;
-        // Left: the symbol and where we are.
-        let (cx, cy) = (500.0, 430.0 + 12.0 * (1.0 - open));
-        r.rect(Rect::new(cx - 150.0, cy - 150.0, 300.0, 300.0), 64.0, Rgba::hex(0x3C3C43).alpha(open));
-        draw_gear_at(r, cx, cy, 5.2, Rgba::hex(0xE6E6EA).alpha(open));
+        let lift = 14.0 * (1.0 - open);
+
+        // Left: the section's symbol on a glass card, and what the section is for.
+        let card = Rect::new(190.0, 230.0 + lift, 420.0, 420.0);
+        glass_surface(r, self.wallpaper, self.backdrop_t.value, card, 96.0, open);
+        r.rect(card, 96.0, white.alpha(0.12 * open));
+        let symbol = SECTION_ICONS.get(self.settings_section).copied().unwrap_or(icon::SETTINGS);
+        text.icon(r, symbol, card.x + card.w * 0.5, card.y + card.h * 0.5, ICON_CARD, dark.alpha(0.8 * open));
+        let about = s.section_about.get(self.settings_section).copied().unwrap_or_default();
+        for (i, line) in wrap(text, r, about, GLASS_SMALL, card.w + 80.0).iter().take(3).enumerate() {
+            let w = text.measure(r, line, GLASS_SMALL);
+            text.draw_top(r, line, card.x + (card.w - w) * 0.5, card.y + card.h + 34.0 + i as f32 * 34.0, GLASS_SMALL, white.alpha(0.75 * open));
+        }
+
+        // Right: the title over the list.
+        let (x, width, row_h, pitch) = (860.0, 920.0, 72.0, 86.0);
         let title = if in_items { *section } else { s.settings };
-        let w = text.measure(r, title, SETUP_TITLE);
-        text.draw_top(r, title, cx - w * 0.5, cy + 200.0, SETUP_TITLE, a(1.0));
-        let hint = if in_items { s.settings_list_hint } else { s.settings_hint };
-        let w = text.measure(r, hint, SETUP_SMALL);
-        text.draw_top(r, hint, cx - w * 0.5, cy + 280.0, SETUP_SMALL, a(0.5));
-        // Right: the list.
-        let (x, width, row_h) = (1000.0, 824.0, 84.0);
-        let rows: Vec<(String, String, bool)> = if in_items {
+        let w = text.measure(r, title, GLASS_TITLE);
+        text.draw_top(r, title, x + (width - w) * 0.5, 64.0 + lift, GLASS_TITLE, white.alpha(0.9 * open));
+        let rows: Vec<(String, String, bool, bool)> = if in_items {
             items
                 .iter()
                 .map(|item| {
@@ -444,37 +462,48 @@ impl Home {
                         Some(on) => if on { s.on } else { s.off }.to_string(),
                         None => item.value.clone(),
                     };
-                    (item.label.clone(), value, item.enabled)
+                    // A chevron where OK leads somewhere or picks the next value.
+                    let more = item.on.is_none() && item.enabled && !matches!(item.id, SettingId::RefreshImages);
+                    (item.label.clone(), value, item.enabled, more)
                 })
                 .collect()
         } else {
-            sections.iter().map(|(name, _)| (name.to_string(), String::new(), true)).collect()
+            sections.iter().map(|(name, _)| (name.to_string(), String::new(), true, true)).collect()
         };
         let focus = if in_items { self.settings_row } else { self.settings_section };
-        let top = (LOGICAL_H - rows.len() as f32 * row_h).max(160.0) * 0.5 - 20.0;
-        for (i, (label, value, enabled)) in rows.iter().enumerate() {
-            let row = Rect::new(x, top + i as f32 * row_h, width, row_h - 12.0);
+        let top = 170.0 + lift;
+        for (i, (label, value, enabled, more)) in rows.iter().enumerate() {
+            let row = Rect::new(x, top + i as f32 * pitch, width, row_h);
             if *enabled {
                 let target = if in_items { Target::SettingsRow(i) } else { Target::SettingsSection(i) };
                 self.hits.borrow_mut().push((row, target));
             }
             let focused = i == focus;
-            let row = if focused { row.scale_about(1.03, 0.5, 0.5) } else { row };
+            let row = if focused { row.scale_about(1.02, 0.5, 0.5) } else { row };
             if focused {
-                r.shadow(row.offset(0.0, 14.0), 16.0, 36.0, Rgba::hex(0).alpha(0.5 * open));
-                r.rect(row, 16.0, white.alpha(open));
+                r.shadow(row.offset(0.0, 12.0), row.h * 0.5, 30.0, Rgba::hex(0).alpha(0.3 * open));
+                r.rect(row, row.h * 0.5, white.alpha(0.96 * open));
+            } else {
+                glass_surface(r, self.wallpaper, self.backdrop_t.value, row, row.h * 0.5, open);
             }
-            let color = if focused { Rgba::hex(0x111114) } else { white };
+            let color = if focused { dark } else { white };
             let dim = if *enabled { 1.0 } else { 0.5 };
-            text.draw(r, label, row.x + 28.0, row.y + row.h * 0.5 + 10.0, MENU_ITEM, color.alpha(open * dim));
-            let value = if value.is_empty() && !in_items { "›".to_string() } else { clip(text, r, value, INPUT_LABEL, width * 0.45) };
-            let w = text.measure(r, &value, INPUT_LABEL);
-            text.draw(r, &value, row.x + row.w - 28.0 - w, row.y + row.h * 0.5 + 9.0, INPUT_LABEL, color.alpha(0.55 * open * dim));
+            text.draw(r, label, row.x + 32.0, row.y + row.h * 0.5 + 11.0, GLASS_ROW, color.alpha(open * dim));
+            let mut right = row.x + row.w - 28.0;
+            if *more {
+                text.icon(r, icon::CHEVRON, right - 14.0, row.y + row.h * 0.5, ICON_SMALL, color.alpha(0.55 * open));
+                right -= 44.0;
+            }
+            if !value.is_empty() {
+                let value = clip(text, r, value, GLASS_ROW, width * 0.45);
+                let w = text.measure(r, &value, GLASS_ROW);
+                text.draw(r, &value, right - w, row.y + row.h * 0.5 + 11.0, GLASS_ROW, color.alpha(0.55 * open * dim));
+            }
         }
         if in_items && self.settings_section == 3 {
-            let y = top + rows.len() as f32 * row_h + 16.0;
-            for (i, line) in wrap(text, r, s.home_button_note, INPUT_SUB, width - 56.0).iter().enumerate() {
-                text.draw_top(r, line, x + 28.0, y + i as f32 * 30.0, INPUT_SUB, a(0.5));
+            let y = top + rows.len() as f32 * pitch + 12.0;
+            for (i, line) in wrap(text, r, s.home_button_note, GLASS_SMALL, width - 64.0).iter().enumerate() {
+                text.draw_top(r, line, x + 32.0, y + i as f32 * 32.0, GLASS_SMALL, white.alpha(0.6 * open));
             }
         }
     }

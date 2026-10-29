@@ -35,11 +35,11 @@ impl Look {
         }
     }
 
-    /// Regular, Medium and SemiBold, in `assets/fonts`.
-    pub fn fonts(self) -> [&'static str; 3] {
+    /// Regular, Medium, SemiBold and the icon font, in `assets/fonts`.
+    pub fn fonts(self) -> [&'static str; 4] {
         match self {
-            Look::Cinematic => ["Outfit-Regular.ttf", "Outfit-Medium.ttf", "Outfit-SemiBold.ttf"],
-            Look::Glass => ["Inter-Regular.ttf", "Inter-Medium.ttf", "Inter-SemiBold.ttf"],
+            Look::Cinematic => ["Outfit-Regular.ttf", "Outfit-Medium.ttf", "Outfit-SemiBold.ttf", ICON_FONT],
+            Look::Glass => ["Inter-Regular.ttf", "Inter-Medium.ttf", "Inter-SemiBold.ttf", ICON_FONT],
         }
     }
 
@@ -60,8 +60,13 @@ impl Look {
         if self == Look::Glass {
             let latin: String = (' '..='~').collect();
             let ui = format!("{}{}", crate::strings::charset(strings), "0123456789:, ");
-            for style in [GLASS_LABEL, GLASS_SECTION, GLASS_CLOCK] {
+            for style in [GLASS_LABEL, GLASS_SECTION, GLASS_CLOCK, GLASS_DATE, GLASS_WEATHER, GLASS_TITLE, GLASS_ROW, GLASS_SMALL] {
                 jobs.push((style, latin.clone() + &ui));
+            }
+            jobs.push((GLASS_BIG_CLOCK, "0123456789:APM ".into()));
+            let icons: String = icon::ALL.iter().collect();
+            for style in [ICON_SMALL, ICON, ICON_LARGE, ICON_CARD] {
+                jobs.push((style, icons.clone()));
             }
         }
         jobs
@@ -73,6 +78,82 @@ pub const GLASS_BG: Rgba = Rgba::hex(0x0B0B0F);
 pub const GLASS_LABEL: Style = Style::new(Weight::SemiBold, 26.0);
 pub const GLASS_SECTION: Style = Style::new(Weight::SemiBold, 30.0);
 pub const GLASS_CLOCK: Style = Style::new(Weight::SemiBold, 46.0);
+/// Date and time in one line at the top left, and the weather under it.
+pub const GLASS_DATE: Style = Style::new(Weight::Medium, 36.0);
+pub const GLASS_WEATHER: Style = Style::new(Weight::Regular, 27.0);
+/// The stacked clock.
+pub const GLASS_BIG_CLOCK: Style = Style::new(Weight::SemiBold, 150.0).tracking(-0.01);
+/// Settings and panel titles, list rows and their small print.
+pub const GLASS_TITLE: Style = Style::new(Weight::SemiBold, 52.0);
+pub const GLASS_ROW: Style = Style::new(Weight::Medium, 31.0);
+pub const GLASS_SMALL: Style = Style::new(Weight::Regular, 24.0);
+pub const ICON_SMALL: Style = Style::new(Weight::Icon, 30.0);
+pub const ICON: Style = Style::new(Weight::Icon, 40.0);
+pub const ICON_LARGE: Style = Style::new(Weight::Icon, 52.0);
+pub const ICON_CARD: Style = Style::new(Weight::Icon, 150.0);
+
+/// Material Symbols Rounded (Apache 2.0), subset to these characters.
+pub const ICON_FONT: &str = "MaterialSymbolsRounded.ttf";
+
+pub mod icon {
+    pub const SUNNY: char = '\u{e81a}';
+    pub const CLEAR_NIGHT: char = '\u{f159}';
+    pub const PARTLY_CLOUDY_DAY: char = '\u{f172}';
+    pub const PARTLY_CLOUDY_NIGHT: char = '\u{f174}';
+    pub const CLOUD: char = '\u{f15c}';
+    pub const FOGGY: char = '\u{e818}';
+    pub const RAINY_LIGHT: char = '\u{f61e}';
+    pub const RAINY: char = '\u{f176}';
+    pub const RAINY_HEAVY: char = '\u{f61f}';
+    pub const RAINY_SNOW: char = '\u{f61d}';
+    pub const SNOWY: char = '\u{e2cd}';
+    pub const THUNDERSTORM: char = '\u{ebdb}';
+    pub const HAIL: char = '\u{f67f}';
+    pub const SOUND: char = '\u{e050}';
+    pub const PICTURE: char = '\u{e63b}';
+    pub const THEME: char = '\u{eb37}';
+    pub const TIMER: char = '\u{e425}';
+    pub const BRIGHTNESS: char = '\u{e518}';
+    pub const SCREEN_OFF: char = '\u{e99d}';
+    pub const POWER: char = '\u{f8c7}';
+    pub const SETTINGS: char = '\u{e8b8}';
+    pub const INPUTS: char = '\u{e8c2}';
+    pub const CONTROLS: char = '\u{e429}';
+    pub const LINK: char = '\u{e250}';
+    pub const CLOCK: char = '\u{efd6}';
+    pub const HOME: char = '\u{e9b2}';
+    pub const ROWS: char = '\u{e8e9}';
+    pub const APPEARANCE: char = '\u{e40a}';
+    pub const CHEVRON: char = '\u{e5cc}';
+    pub const WALLPAPER: char = '\u{e1bc}';
+    pub const UPDATE: char = '\u{f2cd}';
+
+    pub const ALL: [char; 31] = [
+        SUNNY, CLEAR_NIGHT, PARTLY_CLOUDY_DAY, PARTLY_CLOUDY_NIGHT, CLOUD, FOGGY, RAINY_LIGHT, RAINY, RAINY_HEAVY, RAINY_SNOW, SNOWY,
+        THUNDERSTORM, HAIL, SOUND, PICTURE, THEME, TIMER, BRIGHTNESS, SCREEN_OFF, POWER, SETTINGS, INPUTS, CONTROLS, LINK, CLOCK,
+        HOME, ROWS, APPEARANCE, CHEVRON, WALLPAPER, UPDATE,
+    ];
+
+    /// The icon for a WMO weather code, by day or night.
+    pub fn weather(code: u32, day: bool) -> char {
+        match code {
+            0 if day => SUNNY,
+            0 => CLEAR_NIGHT,
+            1 | 2 if day => PARTLY_CLOUDY_DAY,
+            1 | 2 => PARTLY_CLOUDY_NIGHT,
+            3 => CLOUD,
+            45 | 48 => FOGGY,
+            51..=57 => RAINY_LIGHT,
+            65 | 82 => RAINY_HEAVY,
+            66 | 67 => RAINY_SNOW,
+            61..=64 | 80 | 81 => RAINY,
+            71..=77 | 85 | 86 => SNOWY,
+            96 | 99 => HAIL,
+            95 => THUNDERSTORM,
+            _ => CLOUD,
+        }
+    }
+}
 
 pub const BG: Rgba = Rgba::hex(0x07080B);
 pub const TEXT: Rgba = Rgba::hex(0xF5F1E8);

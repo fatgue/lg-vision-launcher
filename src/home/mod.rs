@@ -1,6 +1,7 @@
 //! Home screen state, input and drawing (direction A, "Cinematic Ambient").
 mod chrome;
 mod cinematic;
+mod control;
 mod glass;
 mod homebrew;
 mod nav;
@@ -79,6 +80,9 @@ pub enum Action {
     HomebrewRemove(String),
     /// Install a newer Vision (it restarts afterwards).
     VisionUpdate(crate::model::Package),
+    /// Read the TV's picture and sound settings (for the Control Center); change one.
+    TvSettings,
+    TvControl(crate::model::TvControl),
     /// Start (Some) or stop (None) the live preview.
     Preview(Option<Stream>),
     Exit,
@@ -271,6 +275,9 @@ enum Mode {
     Settings,
     /// The Homebrew apps page.
     Homebrew(homebrew::Brew),
+    /// Glass: the inputs list and the Control Center (the focused row or item).
+    Inputs(usize),
+    Control(usize),
     /// TiviOne's store page.
     Store(Store),
 }
@@ -350,6 +357,8 @@ enum SettingId {
     TiviOnePromo,
     /// As Home: close unused apps when memory runs low.
     FreeMemory,
+    /// Glass: the date and time in one line, or a large clock with the forecast.
+    ClockStyle,
     /// Install the newer Vision release.
     VisionUpdate,
     Info,
@@ -381,6 +390,9 @@ enum Target {
     BrewTab(usize),
     BrewCard(usize),
     BrewButton(usize),
+    HeaderButton(usize),
+    InputRow(usize),
+    ControlItem(usize),
 }
 
 struct Hero {
@@ -400,10 +412,11 @@ pub struct Home {
     backdrop: Option<String>,
     previous_backdrop: Option<String>,
     backdrop_t: Spring,
-    /// Glass parallax: the focused tile's tilt (-1..1), from the pointer or a short kick when
-    /// focus moves; and the wiggle clock while moving apps.
-    tilt_x: Spring,
-    tilt_y: Spring,
+    /// Glass: which round button at the top right has focus (0 inputs, 1 Control Center).
+    header_item: usize,
+    /// The TV's picture and sound settings, while the Control Center shows them.
+    tv_settings: Option<crate::model::TvSettings>,
+    /// Glass: the wiggle clock while moving apps.
     wiggle: f32,
     /// Glass wallpaper and its blurred copy (for the dock), once loaded.
     wallpaper: Option<(Texture, Texture)>,
@@ -502,8 +515,8 @@ impl Home {
             brew_progress: HashMap::new(),
             brew_scroll: Spring::new(0.0, 16.0),
             versions: HashMap::new(),
-            tilt_x: Spring::new(0.0, 7.0),
-            tilt_y: Spring::new(0.0, 7.0),
+            header_item: 1,
+            tv_settings: None,
             wiggle: 0.0,
             strings: strings::current(),
             rails: [
@@ -568,7 +581,6 @@ impl Home {
             loaded: false,
         };
         home.apply_look();
-        glass::upload_sheen(renderer, home.art_atlas);
         if home.look == Look::Glass {
             home.pending.push(Action::Wallpaper(home.prefs.ui.wallpaper.clone()));
         }
@@ -670,7 +682,7 @@ impl Home {
 
     /// Moves focus to whatever the pointer is over. Returns true when something changed.
     pub fn pointer(&mut self, x: f32, y: f32) -> bool {
-        let Some((rect, target)) = self.hit_rect(x, y) else { return false };
+        let Some((_, target)) = self.hit_rect(x, y) else { return false };
         if matches!(self.mode, Mode::Homebrew(_)) {
             let changed = self.brew_pointer(target);
             if changed {
@@ -678,12 +690,14 @@ impl Home {
             }
             return changed;
         }
-        if self.look == Look::Glass {
-            // The tile under the pointer tilts towards it.
-            self.tilt_x.target = ((x - rect.x - rect.w * 0.5) / (rect.w * 0.5)).clamp(-1.0, 1.0);
-            self.tilt_y.target = ((y - rect.y - rect.h * 0.5) / (rect.h * 0.5)).clamp(-1.0, 1.0);
-        }
         let changed = match (target, &mut self.mode) {
+            (Target::HeaderButton(i), Mode::Browse) => {
+                let changed = !self.header || self.header_item != i;
+                self.header = true;
+                self.header_item = i;
+                changed
+            }
+            (Target::InputRow(i) | Target::ControlItem(i), Mode::Inputs(_) | Mode::Control(_)) => self.control_pointer(i),
             (Target::Gear, Mode::Browse) => !std::mem::replace(&mut self.header, true),
             (Target::SettingsSection(i), Mode::Settings) => {
                 let changed = self.settings_section != i || self.settings_column != 0;
@@ -852,6 +866,7 @@ impl Home {
             .map(|(i, input)| {
                 let mut tile = Tile::new(input.id, input.label, Kind::Input { connected: input.connected }, i);
                 tile.launch_id = input.app_id;
+                tile.detail = input.device.unwrap_or_default();
                 tile.bg = Rgba::hex(0x14161C);
                 tile.accent = ACCENT_INPUT;
                 tile
@@ -1490,6 +1505,8 @@ impl Home {
             Mode::Settings => self.settings_key(key),
             Mode::Store(_) => self.store_key(key),
             Mode::Homebrew(_) => self.homebrew_key(key),
+            Mode::Inputs(_) => self.inputs_key(key),
+            Mode::Control(_) => self.control_key(key),
             Mode::Browse if self.header && self.look == Look::Cinematic => self.header_key(key),
             Mode::Browse if matches!(key, Key::Digit(_)) || (self.digits.is_some() && key == Key::Ok) => self.digit_key(key),
             Mode::Browse => self.browse_key(key, home_mode),
@@ -1555,10 +1572,14 @@ impl Home {
             item(SettingId::Location, s.location, location, None),
             item(SettingId::Units, s.units, if ui.fahrenheit { s.fahrenheit } else { s.celsius }.to_string(), None),
         ];
-        let clock = vec![
+        let mut clock = vec![
             item(SettingId::Clock24, s.time_format, if ui.clock24 { s.hours24 } else { s.hours12 }.to_string(), None),
             item(SettingId::ShowDate, s.show_date, onoff(ui.show_date), Some(ui.show_date)),
         ];
+        if self.look == Look::Glass {
+            let style = if ui.clock_style == "inline" { s.clock_inline } else { s.clock_stacked };
+            clock.push(item(SettingId::ClockStyle, s.clock_style, style.to_string(), None));
+        }
         let home = vec![item(SettingId::HomeTakeover, s.vision_as_home, onoff(self.home_mode), Some(self.home_mode))];
         let rows = ROW_KEYS
             .iter()
@@ -1725,6 +1746,7 @@ impl Home {
             SettingId::Motion => ui.reduced_motion = !ui.reduced_motion,
             SettingId::Preview => ui.preview = !ui.preview,
             SettingId::FreeMemory => ui.free_memory = !ui.free_memory,
+            SettingId::ClockStyle => ui.clock_style = if ui.clock_style == "inline" { "stacked" } else { "inline" }.to_string(),
             SettingId::VisionUpdate => {
                 let busy = matches!(self.vision_install, InstallState::Downloading(_) | InstallState::Installing | InstallState::Done);
                 let package = self.vision_update.clone().filter(|_| !busy)?;
@@ -2104,7 +2126,10 @@ impl Home {
 
     fn refocus(&mut self, instant: bool) {
         let moving = matches!(self.mode, Mode::Move { .. });
-        let overlay = matches!(self.mode, Mode::Menu(_) | Mode::Setup { .. } | Mode::Offer { .. } | Mode::Picker(_) | Mode::Settings | Mode::Store(_) | Mode::Homebrew(_));
+        let overlay = matches!(
+            self.mode,
+            Mode::Menu(_) | Mode::Setup { .. } | Mode::Offer { .. } | Mode::Picker(_) | Mode::Settings | Mode::Store(_) | Mode::Homebrew(_) | Mode::Inputs(_) | Mode::Control(_)
+        );
         self.brew_refocus();
         let active = self.active;
         for (r, rail) in self.rails.iter_mut().enumerate() {

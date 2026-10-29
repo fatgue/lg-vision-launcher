@@ -52,6 +52,8 @@ pub struct UiPrefs {
     pub wallpaper: String,
     /// As Home: close the app longest in the background when memory runs low (`memory.rs`).
     pub free_memory: bool,
+    /// Glass: `stacked` (a large clock with the forecast) or `inline` (one line).
+    pub clock_style: String,
 }
 
 impl Default for UiPrefs {
@@ -70,6 +72,7 @@ impl Default for UiPrefs {
             theme: "cinematic".into(),
             wallpaper: "valley".into(),
             free_memory: true,
+            clock_style: "stacked".into(),
         }
     }
 }
@@ -110,6 +113,7 @@ impl Prefs {
             theme: ui.and_then(|u| u.get("theme")).and_then(Value::as_str).unwrap_or(&defaults.theme).to_string(),
             wallpaper: ui.and_then(|u| u.get("wallpaper")).and_then(Value::as_str).unwrap_or(&defaults.wallpaper).to_string(),
             free_memory: flag("freeMemory", defaults.free_memory),
+            clock_style: ui.and_then(|u| u.get("clockStyle")).and_then(Value::as_str).unwrap_or(&defaults.clock_style).to_string(),
         };
         Self { order: list("order"), hidden: list("hidden"), ui }
     }
@@ -137,6 +141,7 @@ impl Prefs {
                 "theme": ui.theme,
                 "wallpaper": ui.wallpaper,
                 "freeMemory": ui.free_memory,
+                "clockStyle": ui.clock_style,
             },
         });
         std::fs::write(&temp, serde_json::to_vec_pretty(&body).unwrap_or_default())?;

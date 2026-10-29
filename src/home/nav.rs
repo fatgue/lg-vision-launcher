@@ -1,33 +1,19 @@
-//! Remote navigation for the Glass look: the gear (Settings) at the top, the Top Shelf of the
-//! focused app in the dock, the app grid and the rows under it.
+//! Remote navigation for the Glass look: the round buttons at the top (inputs, Control Center),
+//! the Top Shelf of the focused app in the dock, the app grid and the rows under it.
 use super::glass::COLS;
 use super::*;
 
 impl Home {
     pub(super) fn glass_browse_key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
-        let before = (self.active, self.rails[self.active].focus, self.header);
-        let action = if self.header {
-            self.gear_key(key)
+        if self.header {
+            self.buttons_key(key)
         } else if self.active == FAVORITES {
             self.grid_key(key, home_mode)
         } else if self.in_shelf() {
             self.shelf_key(key)
         } else {
             self.rows_key(key)
-        };
-        // A newly focused tile arrives tilted from the direction of travel and settles flat.
-        if (self.active, self.rails[self.active].focus, self.header) != before {
-            let (x, y) = match key {
-                Key::Left => (0.7, 0.0),
-                Key::Right => (-0.7, 0.0),
-                Key::Up => (0.0, 0.7),
-                Key::Down => (0.0, -0.7),
-                _ => (0.0, 0.0),
-            };
-            self.tilt_x = Spring::new(x, 7.0);
-            self.tilt_y = Spring::new(y, 7.0);
         }
-        action
     }
 
     fn focus_grid(&mut self, index: usize) {
@@ -36,14 +22,12 @@ impl Home {
         self.rails[FAVORITES].focus = index.min(self.rails[FAVORITES].tiles.len().saturating_sub(1));
     }
 
-    /// The gear at the top left: OK opens Settings, Down returns to the dock.
-    fn gear_key(&mut self, key: Key) -> Option<Action> {
+    /// The round buttons at the top right: OK opens the inputs or the Control Center.
+    fn buttons_key(&mut self, key: Key) -> Option<Action> {
         match key {
-            Key::Ok => {
-                self.mode = Mode::Settings;
-                self.settings_column = 0;
-                self.ip = crate::net::local_ip();
-            }
+            Key::Ok => return self.open_header_item(),
+            Key::Left => self.header_item = 0,
+            Key::Right => self.header_item = 1,
             Key::Down | Key::Back => {
                 self.header = false;
                 self.active = FAVORITES;
@@ -61,13 +45,16 @@ impl Home {
             Key::Left if column > 0 => self.focus_grid(index - 1),
             Key::Right if column + 1 < COLS && index + 1 < total => self.focus_grid(index + 1),
             Key::Up if index >= COLS => self.focus_grid(index - COLS),
-            // From the dock into the app's Top Shelf content if it has any, else to the gear.
+            // From the dock into the app's Top Shelf content if it has any, else to the buttons.
             Key::Up => match self.shelf_rails().iter().find(|&&r| self.has(r)) {
                 Some(&rail) => {
                     self.active = rail;
                     self.rails[rail].focus = 0;
                 }
-                None => self.header = true,
+                None => {
+                    self.header = true;
+                    self.header_item = 1;
+                }
             },
             Key::Down if index + COLS < total => self.focus_grid(index + COLS),
             // A shorter last row: its last tile.
@@ -106,11 +93,12 @@ impl Home {
                 self.active = strip[at - 1];
                 self.rails[self.active].focus = self.rails[self.active].tiles.len().saturating_sub(1);
             }
-            // Back to the app (its focus never left it); above the shelf is the gear.
+            // Back to the app (its focus never left it); above the shelf are the buttons.
             Key::Down | Key::Back => self.active = FAVORITES,
             Key::Up => {
                 self.active = FAVORITES;
                 self.header = true;
+                self.header_item = 1;
             }
             Key::Ok => return self.activate(),
             _ => {}

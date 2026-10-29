@@ -19,7 +19,10 @@ pub struct Input {
     pub id: String,
     pub label: String,
     pub app_id: String,
+    /// A device is plugged in.
     pub connected: bool,
+    /// What the device calls itself over HDMI (vendor and product), when it says.
+    pub device: Option<String>,
 }
 
 /// RGBA8 image (an icon ≤128 px or 320×180 tile artwork) with its dominant colour.
@@ -98,6 +101,8 @@ pub enum Update {
     Versions(Vec<(String, String)>),
     /// A newer Vision release on GitHub (None: Vision is up to date).
     VisionRelease(Option<Package>),
+    /// The TV's picture and sound settings (None: they could not be read).
+    TvSettings(Option<TvSettings>),
     VisionInstall(InstallState),
 }
 
@@ -234,6 +239,18 @@ pub struct Weather {
     pub temperature: f32,
     /// WMO weather interpretation code.
     pub code: u32,
+    /// Daylight at the location now (for the icon).
+    pub is_day: bool,
+    /// Today and the following days (`day_count` of them are filled).
+    pub days: [Forecast; 6],
+    pub day_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Forecast {
+    pub code: u32,
+    pub max: f32,
+    pub min: f32,
 }
 
 /// A Home Assistant entity shown as a tile or in the picker.
@@ -627,6 +644,47 @@ pub enum Request {
     HomebrewRemove(String),
     /// Download, verify and install a Vision release, then restart Vision.
     VisionUpdate(Package),
+    /// Read the TV's picture and sound settings; change one (root, via settingsservice).
+    TvSettings,
+    TvControl(TvControl),
+}
+
+/// The TV settings the Control Center shows. Picture settings are per input and signal
+/// (SDR, HDR, Dolby Vision): the modes listed are the ones for what is on screen now.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TvSettings {
+    pub picture_mode: String,
+    pub picture_modes: Vec<String>,
+    pub sound_mode: String,
+    pub sound_modes: Vec<String>,
+    /// OLED light (or backlight), 0–100.
+    pub brightness: u32,
+    /// "off" or minutes.
+    pub sleep_timer: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TvControl {
+    PictureMode(String),
+    SoundMode(String),
+    Brightness(u32),
+    SleepTimer(String),
+    ScreenOff,
+    PowerOff,
+}
+
+/// Visible, active values of a `getSystemSettingDesc` key.
+pub fn setting_values(desc: &Value, key: &str) -> Vec<String> {
+    desc.get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|r| r.get("key").and_then(Value::as_str) == Some(key))
+        .filter_map(|r| r.pointer("/values/arrayExt").and_then(Value::as_array))
+        .flatten()
+        .filter(|v| v.get("visible").and_then(Value::as_bool) != Some(false) && v.get("active").and_then(Value::as_bool) != Some(false))
+        .filter_map(|v| v.get("value").and_then(Value::as_str).map(str::to_string))
+        .collect()
 }
 
 /// Normalises `listLaunchPoints` (LG's Home bar, already in the user's order), taking each
@@ -698,11 +756,15 @@ pub fn inputs_from_status(reply: &Value) -> Vec<Input> {
                 .filter(|label| !label.is_empty())
                 .unwrap_or(&id)
                 .to_string();
+            let text = |key: &str| device.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty() && *s != "Unknown");
+            let name = [text("spdVendorName"), text("spdProductDescription")].into_iter().flatten().collect::<Vec<_>>().join(" ");
             Some(Input {
                 id,
                 label,
                 app_id,
-                connected: device.get("connected").and_then(Value::as_bool).unwrap_or(false),
+                // "connected" stays true for ports nothing is plugged into; hdmiPlugIn does not.
+                connected: device.get("hdmiPlugIn").or_else(|| device.get("connected")).and_then(Value::as_bool).unwrap_or(false),
+                device: Some(name).filter(|n| !n.is_empty()),
             })
         })
         .collect()
@@ -898,5 +960,24 @@ fn dominant_color(rgba: &[u8]) -> Option<[u8; 3]> {
         Some(pick(plain, plain_n))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inputs_follow_hdmi_plug_in() {
+        // An LG CX reports "connected" for empty ports; only hdmiPlugIn tells.
+        let reply = serde_json::json!({ "devices": [
+            { "id": "HDMI_1", "appId": "com.webos.app.hdmi1", "label": "HDMI 1", "connected": true, "hdmiPlugIn": true,
+              "spdVendorName": "DENON", "spdProductDescription": "AVR-X3400H", "spdSourceDeviceInfo": "Unknown" },
+            { "id": "HDMI_2", "appId": "com.webos.app.hdmi2", "label": "HDMI 2", "connected": true, "hdmiPlugIn": false },
+            { "id": "HDMI_4", "appId": "com.webos.app.hdmi4", "label": "HDMI 4", "connected": false },
+        ]});
+        let inputs = inputs_from_status(&reply);
+        let state: Vec<(bool, Option<&str>)> = inputs.iter().map(|i| (i.connected, i.device.as_deref())).collect();
+        assert_eq!(state, [(true, Some("DENON AVR-X3400H")), (false, None), (false, None)]);
     }
 }

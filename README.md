@@ -60,18 +60,26 @@ Home Assistant tiles and inputs.
 
 ![Cinematic](docs/screenshots/cinematic-home.jpg)
 
-**Glass:** a photo wallpaper with the first row of apps in a frosted dock and more rows below it,
-the gear for Settings at the top left and a large clock at the top right. Focus enlarges a tile with
-a white frame, a soft sheen and a slight parallax tilt; apps wiggle while you move them. When TiviOne
-or Plex has focus in the dock, its channels or "continue watching" appear above the dock, and Up
-opens them with programme details and the live preview. Three wallpapers come with Vision, or send
-your own photo from your phone (**Settings → Appearance → Photo from your phone**). Glass uses the
-Inter typeface.
+**Glass:** a photo wallpaper with the first row of apps in a frosted glass dock and more rows below
+it. At the top left a large clock with the date, the weather and a five-day forecast (or date and time
+in one line: **Settings → Clock → Clock style**); at the top right two round glass buttons for the
+inputs and the **Control Center**. A focused app lifts, with its name underneath; apps wiggle while
+you move them. When TiviOne or Plex has focus in the dock, its channels or "continue watching" appear
+above the dock, and Up opens them with programme details and the live preview.
+
+- **Control Center:** the TV's sound and picture mode (the picture modes that suit what is on screen:
+  SDR, HDR or Dolby Vision), the look, the sleep timer, screen off, turning the TV off, the next
+  wallpaper, Settings, and the brightness (Left / Right).
+- **Settings:** full screen over the blurred wallpaper, a large glass card with each section's symbol
+  and what it is for, and the list in glass rows.
+- Three wallpapers come with Vision, or send your own photo from your phone (**Settings → Appearance →
+  Photo from your phone**). The glass is a blurred copy of the wallpaper seen through the shapes, made
+  once: nothing is blurred while drawing. Glass uses the Inter typeface and Material Symbols.
 
 | | |
 |---|---|
-| ![Glass home](docs/screenshots/glass-home.jpg) | ![Glass Top Shelf](docs/screenshots/glass-shelf.jpg) |
-| ![Glass settings](docs/screenshots/glass-settings.jpg) | ![Moving apps in Glass](docs/screenshots/glass-move.jpg) |
+| ![Glass home](docs/screenshots/glass-home.jpg) | ![The Control Center](docs/screenshots/glass-control.jpg) |
+| ![Glass Top Shelf](docs/screenshots/glass-shelf.jpg) | ![Glass settings](docs/screenshots/glass-settings.jpg) |
 
 ## Performance
 
@@ -129,10 +137,11 @@ features; Vision only shows what TiviOne shares with it, and only after you agre
 - **Homebrew:** open the Homebrew tile; **Left / Right** at the top switch between All, Installed and Updates, **OK** opens an app's page.
 - **Hold OK** on a favourite: **Move** (Left / Right, OK to finish, Back to cancel) or **Hide**.
   Hidden apps have their own row at the bottom; hold OK there to show them again.
-- **Settings:** press **Up** from the top row (or click the gear); in Glass the gear sits at the top left.
+- **Settings:** press **Up** from the top row (or click the gear). In Glass, Up reaches the two round
+  buttons at the top right: **Inputs** and the **Control Center**, which holds Settings.
   - Connections: Home Assistant, Home tiles, Plex, TiviOne
   - Weather: show or hide, location (from Home Assistant or a city entered on the phone), °C / °F
-  - Clock: 24- or 12-hour, date
+  - Clock: 24- or 12-hour, date, clock style (Glass)
   - Home button: Vision as Home on or off
   - Rows: show or hide each row
   - Appearance: theme, wallpaper and a photo from your phone (Glass), ambient light (Cinematic), motion, live preview
@@ -227,5 +236,6 @@ Vision is released under the [MIT licence](LICENSE). Not affiliated with LG Elec
 - SDL2 / SDL-webOS: zlib licence (`licenses/SDL2.txt` in the IPK)
 - Outfit (typeface): SIL Open Font License 1.1 (`assets/fonts/OFL.txt`)
 - Inter (typeface, Glass): SIL Open Font License 1.1 (`assets/fonts/Inter-OFL.txt`), subset to Latin
+- Material Symbols Rounded (icons): Apache License 2.0 (`assets/fonts/MaterialSymbols-LICENSE.txt`), subset to the icons Vision uses
 - Wallpapers: CC0 photos from Wikimedia Commons (`assets/wallpapers/CREDITS.txt`)
 - The Home takeover follows the approach of [Luma](https://github.com/ecklf/lg-luma) (MIT); no code was copied.

@@ -3,7 +3,7 @@
 use crate::companion::{self, Companion};
 use crate::config::Config;
 use crate::log::log;
-use crate::model::{self, Entity, HaCategory, MediaItem, ServiceRequest, Status, TvFeed, Update, Weather};
+use crate::model::{self, Entity, Forecast, HaCategory, MediaItem, ServiceRequest, Status, TvFeed, Update, Weather};
 use std::collections::HashMap;
 use base64::Engine;
 use crate::net;
@@ -378,15 +378,30 @@ impl Worker {
     fn weather(&mut self) -> Option<()> {
         let (lat, lon) = self.config.location.or(self.ha_location)?;
         let url = format!(
-            "https://api.open-meteo.com/v1/forecast?latitude={lat:.3}&longitude={lon:.3}&current=temperature_2m,weather_code&timezone=auto"
+            "https://api.open-meteo.com/v1/forecast?latitude={lat:.3}&longitude={lon:.3}&current=temperature_2m,weather_code,is_day\
+             &daily=weather_code,temperature_2m_max,temperature_2m_min&forecast_days=6&timezone=auto"
         );
         match net::get_json(&self.agent, &url, &[]) {
             Ok(reply) => {
                 let current = reply.get("current")?;
-                let weather = Weather {
+                let mut weather = Weather {
                     temperature: current.get("temperature_2m")?.as_f64()? as f32,
                     code: current.get("weather_code")?.as_u64()? as u32,
+                    is_day: current.get("is_day").and_then(Value::as_u64) != Some(0),
+                    days: Default::default(),
+                    day_count: 0,
                 };
+                if let Some(daily) = reply.get("daily") {
+                    let column = |key: &str| daily.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+                    let (codes, max, min) = (column("weather_code"), column("temperature_2m_max"), column("temperature_2m_min"));
+                    for (i, day) in weather.days.iter_mut().enumerate() {
+                        let (Some(code), Some(hi), Some(lo)) = (codes.get(i).and_then(Value::as_u64), max.get(i).and_then(Value::as_f64), min.get(i).and_then(Value::as_f64)) else {
+                            break;
+                        };
+                        *day = Forecast { code: code as u32, max: hi as f32, min: lo as f32 };
+                        weather.day_count = i + 1;
+                    }
+                }
                 self.sink.send(Update::Weather(Some(weather)));
                 Some(())
             }

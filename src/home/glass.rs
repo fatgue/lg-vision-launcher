@@ -1,39 +1,44 @@
-//! The Glass look: a photo wallpaper, the first row of apps in a frosted dock, more rows
-//! below it, Settings behind the gear at the top left and a large clock at the top right.
-//! When TiviOne or Plex has focus in the dock, its content appears above the dock (the Top
-//! Shelf); Up opens it with programme details and the live preview.
+//! The Glass look: a photo wallpaper, the first row of apps in a frosted dock and more rows
+//! below it; the date, time and weather at the top left (one line, or a large clock with the
+//! forecast) and two round buttons at the top right (inputs, Control Center). A focused app
+//! lifts, with its name underneath. When TiviOne or Plex has focus in the dock, its content
+//! appears above the dock (the Top Shelf); Up opens it with programme details and the live
+//! preview. The glass is a blurred copy of the wallpaper seen through the shapes: no live blur.
 use super::cinematic::*;
 use super::*;
 
 pub(super) const COLS: usize = 6;
-pub(super) const TILE: (f32, f32) = (255.0, 143.0);
-pub(super) const GAP: f32 = 48.0;
+pub(super) const TILE: (f32, f32) = (250.0, 141.0);
+pub(super) const GAP: f32 = 30.0;
 pub(super) const CARD: (f32, f32) = (285.0, 160.0);
 pub(super) const CARD_GAP: f32 = 28.0;
 pub(super) const ROW_GAP: f32 = 40.0;
-/// Left edge of the first column; six tiles and five gaps end at 1845.
-pub(super) const X0: f32 = 75.0;
+/// Left edge of the first column; six tiles and five gaps end at 1785.
+pub(super) const X0: f32 = 135.0;
 /// The dock holding the first row, and that row's top.
-const DOCK: Rect = Rect::new(25.0, 782.0, 1870.0, 218.0);
-const DOCK_RADIUS: f32 = 44.0;
-const ROW0_Y: f32 = 819.0;
-/// Rows after the first, below the dock.
-const LOWER_TOP: f32 = 1036.0;
-const ROW_PITCH: f32 = 200.0;
+const DOCK: Rect = Rect::new(113.0, 822.0, 1694.0, 186.0);
+const DOCK_RADIUS: f32 = 46.0;
+const ROW0_Y: f32 = 845.0;
+/// Rows after the first, below the dock (with room for the focused app's name).
+const LOWER_TOP: f32 = 1096.0;
+const ROW_PITCH: f32 = 210.0;
 /// Where a focused lower row settles while scrolling.
 const FOCUS_Y: f32 = 560.0;
-const ROWS_TOP_GAP: f32 = 30.0;
+const ROWS_TOP_GAP: f32 = 64.0;
 const ROW_TITLE: f32 = 52.0;
 const ROW_SPACE: f32 = 70.0;
 const RADIUS: f32 = 14.0;
 const CARD_RADIUS: f32 = 12.0;
-const FOCUS_SCALE: f32 = 1.18;
-const CARD_FOCUS_SCALE: f32 = 1.1;
+const FOCUS_SCALE: f32 = 1.12;
+const CARD_FOCUS_SCALE: f32 = 1.08;
+/// How far a focused tile rises.
+const LIFT: f32 = 10.0;
 /// The shelf's cards sit just above the dock.
 const CARDS_Y: f32 = 600.0;
 const SECTION_GAP: f32 = 48.0;
-/// The gear (Settings) at the top left.
-const GEAR: (f32, f32) = (66.0, 60.0);
+/// The forecast cards under the large clock.
+const FORECAST: (f32, f32) = (118.0, 156.0);
+const FORECAST_DAYS: usize = 5;
 const WHITE: Rgba = Rgba::hex(0xFFFFFF);
 const BLACK: Rgba = Rgba::hex(0x000000);
 
@@ -195,7 +200,7 @@ impl Home {
     /// Glass-only springs; returns true while any moves.
     pub(super) fn glass_step(&mut self, dt: f32) -> bool {
         let mut moving = false;
-        for spring in [&mut self.shelf, &mut self.shelf_scroll, &mut self.settings_focus, &mut self.backdrop_t, &mut self.tilt_x, &mut self.tilt_y] {
+        for spring in [&mut self.shelf, &mut self.shelf_scroll, &mut self.settings_focus, &mut self.backdrop_t] {
             moving |= spring.step(dt);
         }
         if matches!(self.mode, Mode::Move { .. }) {
@@ -258,10 +263,13 @@ impl Home {
                 draw_hero_block(r, text, hero, open * fade * t, -60.0, WHITE, PREVIEW_RECT.x - X0 - 40.0);
             }
         }
-        self.glass_header(r, text, &clock, &date, fade);
+        let weekday = chrono::Datelike::weekday(now).num_days_from_monday() as usize;
+        self.glass_header(r, text, &clock, &date, weekday, fade);
         self.glass_dock(r, v);
         self.glass_grid(r, text, v);
         self.glass_row_tiles(r, text, v);
+        self.draw_inputs(r, text);
+        self.draw_control(r, text);
         self.draw_menu(r, text);
         self.draw_setup(r, text);
         self.draw_offer(r, text);
@@ -291,52 +299,71 @@ impl Home {
         }
     }
 
-    /// The gear (Settings) at the top left; the clock, date and weather at the top right.
-    fn glass_header(&self, r: &mut Renderer, text: &mut Text, clock: &str, date: &str, fade: f32) {
+    /// The date, time and weather at the top left (one line, or the large clock with the
+    /// forecast) and the round buttons at the top right. The left block makes way for the
+    /// shelf's programme details.
+    fn glass_header(&self, r: &mut Renderer, text: &mut Text, clock: &str, date: &str, today: usize, fade: f32) {
         if fade <= 0.01 {
             return;
         }
-        let f = self.settings_focus.value.clamp(0.0, 1.0);
-        let (gx, gy) = GEAR;
-        if matches!(self.mode, Mode::Browse) {
-            self.hits.borrow_mut().push((Rect::new(gx - 36.0, gy - 36.0, 72.0, 72.0), Target::Gear));
+        self.draw_header_buttons(r, text, fade);
+        let alpha = fade * (1.0 - self.shelf.value.clamp(0.0, 1.0));
+        if alpha <= 0.01 {
+            return;
         }
-        if f > 0.01 {
-            r.rect(Rect::new(gx - 34.0, gy - 34.0, 68.0, 68.0), 34.0, WHITE.alpha(f * fade));
-        }
-        draw_gear_at(r, gx, gy, 1.3, WHITE.lerp(Rgba::hex(0x111114), f).alpha(fade));
-
-        let shadowed = |text: &mut Text, r: &mut Renderer, s: &str, x: f32, y: f32, style: Style, alpha: f32| {
-            text.draw(r, s, x, y + 2.0, style, BLACK.alpha(0.35 * alpha));
-            text.draw(r, s, x, y, style, WHITE.alpha(alpha));
+        let shadowed = |text: &mut Text, r: &mut Renderer, s: &str, x: f32, top: f32, style: Style, alpha: f32| {
+            text.draw_top(r, s, x, top + 2.0, style, BLACK.alpha(0.3 * alpha));
+            text.draw_top(r, s, x, top, style, WHITE.alpha(alpha));
         };
-        let mut x = LOGICAL_W - 64.0 - text.measure(r, clock, GLASS_CLOCK);
-        shadowed(text, r, clock, x, 76.0, GLASS_CLOCK, fade);
-        if !date.is_empty() {
-            x -= 30.0 + text.measure(r, date, HEADER);
-            shadowed(text, r, date, x, 72.0, HEADER, 0.85 * fade);
+        let weather = self.weather.filter(|_| self.prefs.ui.weather);
+        let degrees = |c: f32| if self.prefs.ui.fahrenheit { c * 9.0 / 5.0 + 32.0 } else { c };
+        // The weather line: icon, place, temperature and conditions.
+        let weather_line = |text: &mut Text, r: &mut Renderer, top: f32| {
+            let Some(w) = weather else { return };
+            let place = self.status.location.as_deref().map(|p| format!("{p} · ")).unwrap_or_default();
+            let label = format!("{place}{:.0}° {}", degrees(w.temperature), self.strings.weather(w.code));
+            text.icon(r, icon::weather(w.code, w.is_day), X0 + 17.0, top + 18.0, ICON_SMALL, WHITE.alpha(0.9 * alpha));
+            shadowed(text, r, &label, X0 + 46.0, top, GLASS_WEATHER, 0.9 * alpha);
+        };
+        if self.prefs.ui.clock_style == "inline" {
+            let line = if date.is_empty() { clock.to_string() } else { format!("{date}   {clock}") };
+            shadowed(text, r, &line, X0, 58.0, GLASS_DATE, alpha);
+            weather_line(text, r, 112.0);
+            return;
         }
-        if let Some(weather) = self.weather.filter(|_| self.prefs.ui.weather) {
-            let temperature = if self.prefs.ui.fahrenheit { weather.temperature * 9.0 / 5.0 + 32.0 } else { weather.temperature };
-            let label = format!("{temperature:.0}° · {}", self.strings.weather(weather.code));
-            x -= 30.0 + text.measure(r, &label, HEADER);
-            shadowed(text, r, &label, x, 72.0, HEADER, 0.85 * fade);
+        // Stacked: a large clock, the date, the weather and the next days.
+        shadowed(text, r, clock, X0 - 6.0, 30.0, GLASS_BIG_CLOCK, 0.92 * alpha);
+        let mut top = 214.0;
+        if !date.is_empty() {
+            shadowed(text, r, date, X0, top, GLASS_DATE, 0.9 * alpha);
+            top += 56.0;
+        }
+        weather_line(text, r, top);
+        let Some(w) = weather else { return };
+        let top = top + 58.0;
+        for i in 0..w.day_count.min(FORECAST_DAYS) {
+            let day = w.days[i];
+            let card = Rect::new(X0 + i as f32 * (FORECAST.0 + 14.0), top, FORECAST.0, FORECAST.1);
+            glass_surface(r, self.wallpaper, self.backdrop_t.value, card, 22.0, alpha);
+            let name = if i == 0 { self.strings.today.to_string() } else { self.strings.day_short((today + i) % 7).to_string() };
+            let name = clip(text, r, &name, GLASS_SMALL, card.w - 16.0);
+            let width = text.measure(r, &name, GLASS_SMALL);
+            text.draw_top(r, &name, card.x + (card.w - width) * 0.5, card.y + 14.0, GLASS_SMALL, WHITE.alpha(0.85 * alpha));
+            text.icon(r, icon::weather(day.code, true), card.x + card.w * 0.5, card.y + 80.0, ICON, WHITE.alpha(alpha));
+            let range = format!("{:.0}° {:.0}°", degrees(day.max), degrees(day.min));
+            let width = text.measure(r, &range, GLASS_SMALL);
+            text.draw_top(r, &range, card.x + (card.w - width) * 0.5, card.y + 112.0, GLASS_SMALL, WHITE.alpha(0.9 * alpha));
         }
     }
 
-    /// Frosted glass: the blurred copy of the wallpaper behind the dock, lightly tinted.
+    /// Frosted glass with a light rim: the blurred copy of the wallpaper behind the dock.
     fn glass_dock(&self, r: &mut Renderer, dy: f32) {
         let dock = DOCK.offset(0.0, dy);
         if dock.y > LOGICAL_H || dock.y + dock.h < 0.0 {
             return;
         }
-        r.shadow(dock.offset(0.0, 12.0), DOCK_RADIUS, 40.0, BLACK.alpha(0.25));
-        if let Some((_, blur)) = self.wallpaper {
-            let uv = [dock.x / LOGICAL_W, dock.y / LOGICAL_H, (dock.x + dock.w) / LOGICAL_W, (dock.y + dock.h) / LOGICAL_H];
-            r.image(blur, dock, uv, DOCK_RADIUS, WHITE.alpha(self.backdrop_t.value.clamp(0.0, 1.0)));
-        }
-        r.rect(dock, DOCK_RADIUS, WHITE.alpha(0.14));
-        r.stroke(dock.inflate(-0.75), DOCK_RADIUS, 1.5, WHITE.alpha(0.3));
+        r.shadow(dock.offset(0.0, 12.0), DOCK_RADIUS, 40.0, BLACK.alpha(0.22));
+        glass_surface(r, self.wallpaper, self.backdrop_t.value, dock, DOCK_RADIUS, 1.0);
     }
 
     /// The focused app's shelf content: section titles over cards, just above the dock.
@@ -384,13 +411,22 @@ impl Home {
                     continue;
                 }
                 let f = tile.focus.value.clamp(0.0, 1.0).max(if i == favorites.focus { lift } else { 0.0 });
-                let rect = base.scale_about(1.0 + (FOCUS_SCALE - 1.0) * f, 0.5, 0.5);
+                let rect = base.scale_about(1.0 + (FOCUS_SCALE - 1.0) * f, 0.5, 0.5).offset(0.0, -LIFT * f);
                 if pass == 0 && browse {
                     self.hits.borrow_mut().push((rect, Target::Tile { rail: FAVORITES, index: i }));
                 }
                 self.wiggle_tile(r, rect, i);
                 self.glass_tile(r, text, pass, tile, rect, f, 1.0, RADIUS);
                 r.set_rotation(None);
+                if pass == 3 && f > 0.01 {
+                    // The name under the focused app: below the dock for the first row.
+                    let below = if tile.grow.value < 0.5 { DOCK.y + DOCK.h + dy + 10.0 } else { base.y + base.h + 12.0 };
+                    let name = clip(text, r, &tile.title, GLASS_SMALL, TILE.0 + GAP);
+                    let w = text.measure(r, &name, GLASS_SMALL);
+                    let x = base.x + (base.w - w) * 0.5;
+                    text.draw_top(r, &name, x, below + 2.0, GLASS_SMALL, BLACK.alpha(0.35 * f));
+                    text.draw_top(r, &name, x, below, GLASS_SMALL, WHITE.alpha(0.95 * f));
+                }
             }
         }
     }
@@ -424,7 +460,7 @@ impl Home {
                         continue;
                     }
                     let f = tile.focus.value.clamp(0.0, 1.0);
-                    let rect = base.scale_about(1.0 + (CARD_FOCUS_SCALE - 1.0) * f, 0.5, 0.5);
+                    let rect = base.scale_about(1.0 + (CARD_FOCUS_SCALE - 1.0) * f, 0.5, 0.5).offset(0.0, -LIFT * f);
                     if pass == 0 && browse {
                         self.hits.borrow_mut().push((rect, Target::Tile { rail, index: i }));
                     }
@@ -435,9 +471,7 @@ impl Home {
     }
 
     /// One tile in one pass (shapes → artwork → icons → text keeps texture switches low).
-    /// Focus: larger, a white frame and a soft shadow, the artwork shifting with the tilt and
-    /// a highlight sweeping across.
-    #[allow(clippy::too_many_arguments)]
+    /// Focus: larger and lifted on a soft shadow.
     fn glass_tile(&self, r: &mut Renderer, text: &mut Text, pass: usize, tile: &Tile, rect: Rect, f: f32, alpha: f32, radius: f32) {
         let view = TileView {
             now: if pass == 3 { self.channel_now(tile) } else { None },
@@ -451,59 +485,27 @@ impl Home {
             radius,
             ring: false,
         };
-        let (tx, ty) = (self.tilt_x.value * f, self.tilt_y.value * f);
         match pass {
             0 => {
                 if f > 0.01 {
-                    r.shadow(rect.offset(-10.0 * tx, 16.0 * f - 6.0 * ty), radius, 40.0, BLACK.alpha(0.55 * f * alpha));
+                    r.shadow(rect.offset(0.0, 18.0 * f), radius, 36.0, BLACK.alpha(0.5 * f * alpha));
                 }
                 draw_tile_shapes(r, tile, &view);
             }
-            1 => {
-                match view.art {
-                    Some([u0, v0, u1, v1]) if f > 0.01 => {
-                        let zoom = 1.0 + 0.06 * f;
-                        let (hw, hh) = ((u1 - u0) * 0.5 / zoom, (v1 - v0) * 0.5 / zoom);
-                        let (cu, cv) = ((u0 + u1) * 0.5 + tx * ((u1 - u0) * 0.5 - hw), (v0 + v1) * 0.5 + ty * ((v1 - v0) * 0.5 - hh));
-                        draw_tile_art(r, self.art_atlas, &TileView { art: Some([cu - hw, cv - hh, cu + hw, cv + hh]), ..view });
-                    }
-                    _ => draw_tile_art(r, self.art_atlas, &view),
-                }
-                if f > 0.01 {
-                    r.image(self.art_atlas, rect, sheen_uv(rect, 0.5 + 0.3 * tx, 0.3 + 0.3 * ty), radius, WHITE.alpha(0.18 * f * alpha));
-                    r.stroke(rect.inflate(1.5), radius + 1.5, 3.0, WHITE.alpha(f * alpha));
-                }
-            }
+            1 => draw_tile_art(r, self.art_atlas, &view),
             2 => draw_tile_icon(r, self.icon_atlas, &view),
             _ => draw_tile_text(r, text, tile, &view, self.strings),
         }
     }
 }
 
-/// The sheen texture: a soft white disc in the art atlas's unused strip (x 1920–2048).
-const SHEEN: (i32, i32, i32) = (1920, 0, 128);
-
-pub(super) fn upload_sheen(renderer: &Renderer, atlas: Texture) {
-    let (_, _, size) = SHEEN;
-    let half = size as f32 * 0.5;
-    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let d = ((x as f32 + 0.5 - half).hypot(y as f32 + 0.5 - half) / half).min(1.0);
-            pixels.extend_from_slice(&[255, 255, 255, ((1.0 - d) * (1.0 - d) * 255.0) as u8]);
-        }
+/// A glass shape: the blurred wallpaper behind it, a light tint and a rim of light. Without a
+/// wallpaper, a translucent fill.
+pub(super) fn glass_surface(r: &mut Renderer, wallpaper: Option<(Texture, Texture)>, loaded: f32, rect: Rect, radius: f32, alpha: f32) {
+    if let Some((_, blur)) = wallpaper {
+        let uv = [rect.x / LOGICAL_W, rect.y / LOGICAL_H, (rect.x + rect.w) / LOGICAL_W, (rect.y + rect.h) / LOGICAL_H];
+        r.image(blur, rect, uv, radius, WHITE.alpha(loaded.clamp(0.0, 1.0) * alpha));
     }
-    renderer.upload(atlas, SHEEN.0, SHEEN.1, size, size, gl::RGBA, &pixels);
-}
-
-/// UVs that put the sheen's centre at (fx, fy) of `rect` (fractions), with a radius of about
-/// 0.8 of its width; the window stays inside the strip for fx in 0.2..0.8.
-fn sheen_uv(rect: Rect, fx: f32, fy: f32) -> [f32; 4] {
-    let (x0, y0, size) = (SHEEN.0 as f32, SHEEN.1 as f32, SHEEN.2 as f32);
-    let scale = size * 0.5 / (rect.w * 0.8);
-    let (w, h) = (rect.w * scale, rect.h * scale);
-    let u0 = (x0 + size * 0.5 - fx.clamp(0.2, 0.8) * w).clamp(x0, x0 + size - w);
-    let v0 = (y0 + size * 0.5 - fy.clamp(0.0, 1.0) * h).clamp(y0, y0 + size - h);
-    let atlas = ART_ATLAS as f32;
-    [u0 / atlas, v0 / atlas, (u0 + w) / atlas, (v0 + h) / atlas]
+    r.rect(rect, radius, WHITE.alpha(0.13 * alpha));
+    r.stroke(rect.inflate(-0.75), radius, 1.5, WHITE.alpha(0.28 * alpha));
 }
