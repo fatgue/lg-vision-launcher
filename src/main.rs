@@ -222,7 +222,7 @@ fn run(started: Instant) -> Result<(), String> {
     let preview = video::Video::start(
         &sdl_candidates(&exe_dir),
         window,
-        home::PREVIEW_RECT,
+        home.preview_rect(),
         if home_mode { HOME_ID } else { APP_ID },
         &data_dir,
         bus,
@@ -488,6 +488,7 @@ fn run(started: Instant) -> Result<(), String> {
                     Ok(Ok(prewarmed)) => {
                         text.rebuild(&renderer, prewarmed);
                         home.set_look(next);
+                        preview.set_rect(home.preview_rect());
                         log!("look: {}", next.id());
                     }
                     _ => log!("look: fonts for {} failed", next.id()),

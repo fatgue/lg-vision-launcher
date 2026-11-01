@@ -19,7 +19,7 @@ mod imp {
     use crate::sdl;
     use serde_json::{json, Value};
     use std::cell::{Cell, RefCell};
-    use std::ffi::{c_char, c_int, c_void, CStr};
+    use std::ffi::{c_char, c_int, c_void, CStr, CString};
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::{self, Sender};
 
@@ -39,6 +39,8 @@ mod imp {
         info: [*mut c_void; 16],
     }
 
+    type SetExported = unsafe extern "C" fn(*const c_char, *mut SdlRect, *mut SdlRect) -> c_int;
+
     /// SDL_WEBOS_EXPORTED_WINDOW_TYPE_VIDEO
     const EXPORTED_VIDEO: c_int = 0;
     /// The dev-app LS2 role only lets `com.webos.media.client.*` names reach the media server.
@@ -53,7 +55,9 @@ mod imp {
     pub struct Video {
         sdl_paths: Vec<PathBuf>,
         window: sdl::Window,
-        rect: Rect,
+        rect: Cell<Rect>,
+        /// The exported window's id and SDL's setter, to move it when the look changes.
+        exported: RefCell<Option<(CString, SetExported)>>,
         app_id: &'static str,
         /// As Home: the registerApp connection, the only LS2 name LG's role allows.
         bus: Option<Remote>,
@@ -77,7 +81,8 @@ mod imp {
             Self {
                 sdl_paths: sdl_paths.to_vec(),
                 window,
-                rect,
+                rect: Cell::new(rect),
+                exported: RefCell::new(None),
                 app_id,
                 bus,
                 guard,
@@ -129,7 +134,7 @@ mod imp {
                     .get::<unsafe extern "C" fn(c_int) -> *const c_char>(b"SDL_webOSCreateExportedWindow\0")
                     .map_err(|e| e.to_string())?;
                 let set = *lib
-                    .get::<unsafe extern "C" fn(*const c_char, *mut SdlRect, *mut SdlRect) -> c_int>(b"SDL_webOSSetExportedWindow\0")
+                    .get::<SetExported>(b"SDL_webOSSetExportedWindow\0")
                     .map_err(|e| e.to_string())?;
                 // SDL-webOS uses its export table unchecked when the compositor does not offer
                 // wl_webos_foreign: ask the compositor first.
@@ -144,16 +149,21 @@ mod imp {
                 if id.is_null() {
                     return Err("no exported window".into());
                 }
-                // Both regions spelled out: older SDL-webOS builds hand a missing one to
-                // libwayland as NULL, which aborts the process.
-                let mut src = SdlRect { x: 0, y: 0, w: crate::render::LOGICAL_W as c_int, h: crate::render::LOGICAL_H as c_int };
-                let r = self.rect;
-                let mut dst = SdlRect { x: r.x as c_int, y: r.y as c_int, w: r.w as c_int, h: r.h as c_int };
-                set(id, &mut src, &mut dst);
+                place(set, id, self.rect.get());
                 let window_id = CStr::from_ptr(id).to_string_lossy().into_owned();
+                *self.exported.borrow_mut() = Some((CStr::from_ptr(id).to_owned(), set));
                 // The exported window lives as long as the process; keep the library loaded.
                 std::mem::forget(lib);
                 Ok(window_id)
+            }
+        }
+
+        /// Moves the preview (another look); takes effect at once if the window exists.
+        pub fn set_rect(&self, rect: Rect) {
+            self.rect.set(rect);
+            if let Some((id, set)) = self.exported.borrow().as_ref() {
+                // SAFETY: the library stays loaded for the process; the id is SDL's.
+                unsafe { place(*set, id.as_ptr(), rect) };
             }
         }
 
@@ -180,6 +190,14 @@ mod imp {
                 log!("preview: release timed out");
             }
         }
+    }
+
+    /// Puts the exported window's video at `rect` (logical pixels). Both regions spelled out:
+    /// older SDL-webOS builds hand a missing one to libwayland as NULL, which aborts the process.
+    unsafe fn place(set: SetExported, id: *const c_char, r: Rect) {
+        let mut src = SdlRect { x: 0, y: 0, w: crate::render::LOGICAL_W as c_int, h: crate::render::LOGICAL_H as c_int };
+        let mut dst = SdlRect { x: r.x as c_int, y: r.y as c_int, w: r.w as c_int, h: r.h as c_int };
+        set(id, &mut src, &mut dst);
     }
 
     /// Lists the compositor's globals on SDL's own connection (main thread, where SDL
@@ -333,6 +351,8 @@ mod imp {
         pub fn hide(&self) {}
 
         pub fn release(&self) {}
+
+        pub fn set_rect(&self, _rect: Rect) {}
     }
 }
 

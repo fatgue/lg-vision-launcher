@@ -46,7 +46,7 @@ const TV_COMING: usize = 5;
 const HOME: usize = 6;
 const INPUTS: usize = 7;
 const HIDDEN: usize = 8;
-/// Where the live preview plays (16:9, right of the hero text).
+/// Where the live preview plays in Cinematic (16:9, right of the hero text).
 pub const PREVIEW_RECT: Rect = Rect::new(1000.0, 150.0, 824.0, 464.0);
 /// Focus must rest this long on a channel before its preview starts.
 const PREVIEW_DWELL: Duration = Duration::from_millis(900);
@@ -1815,6 +1815,14 @@ impl Home {
 
     pub fn look(&self) -> Look {
         self.look
+    }
+
+    /// Where the live preview plays in the current look.
+    pub fn preview_rect(&self) -> Rect {
+        match self.look {
+            Look::Cinematic => PREVIEW_RECT,
+            Look::Glass => glass::PREVIEW,
+        }
     }
 
     fn browse_key(&mut self, key: Key, home_mode: bool) -> Option<Action> {

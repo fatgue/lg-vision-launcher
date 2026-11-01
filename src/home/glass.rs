@@ -36,6 +36,8 @@ const LIFT: f32 = 10.0;
 /// The shelf's cards sit just above the dock.
 const CARDS_Y: f32 = 600.0;
 const SECTION_GAP: f32 = 48.0;
+/// The live preview: under the round buttons and above the shelf's section titles (16:9).
+pub(super) const PREVIEW: Rect = Rect::new(1129.0, 160.0, 656.0, 369.0);
 /// The forecast cards under the large clock.
 const FORECAST: (f32, f32) = (118.0, 156.0);
 const FORECAST_DAYS: usize = 5;
@@ -252,15 +254,15 @@ impl Home {
             self.glass_shelf(r, text, fade);
         }
         if self.preview.is_some() {
-            r.punch(PREVIEW_RECT);
-            let pill = Rect::new(PREVIEW_RECT.x + 20.0, PREVIEW_RECT.y + 20.0, 84.0, 36.0);
+            r.punch(PREVIEW);
+            let pill = Rect::new(PREVIEW.x + 20.0, PREVIEW.y + 20.0, 84.0, 36.0);
             r.rect(pill, 8.0, Rgba::hex(0xE5484D));
             text.draw(r, &self.strings.live.to_uppercase(), pill.x + 14.0, pill.y + 26.0, INPUT_SUB, WHITE);
         }
         if open > 0.01 && fade > 0.01 {
             if let Some(hero) = &self.hero {
                 let t = self.hero_t.value.clamp(0.0, 1.0);
-                draw_hero_block(r, text, hero, open * fade * t, -60.0, WHITE, PREVIEW_RECT.x - X0 - 40.0);
+                draw_hero_block(r, text, hero, open * fade * t, -60.0, WHITE, PREVIEW.x - X0 - 40.0);
             }
         }
         let weekday = chrono::Datelike::weekday(now).num_days_from_monday() as usize;
