@@ -42,9 +42,13 @@ apply() {
   fi
   if ! mounted; then
     mount --bind "$APPDIR/vision" "$EXE" || return 1
-    # A stock Home started before the mount keeps running the old file: end it, so the
-    # next Home key starts Vision.
-    [ "$1" = boot ] && stop_home
+    # Home pressed before the mount started LG's Home, which keeps running the old file: end it.
+    # If it was on screen, Vision takes its place at once (else the screen would go black).
+    if [ "$1" = boot ]; then
+      front=$(luna-send -n 1 -w 3000 luna://com.webos.applicationManager/getForegroundAppInfo '{}' </dev/null 2>/dev/null | grep -c "\"$HOME_ID\"")
+      stop_home
+      [ "$front" -gt 0 ] && luna launch "{\"id\":\"$HOME_ID\"}"
+    fi
   fi
   echo "$APP_ID" > "$MARKER"
 }
@@ -95,9 +99,9 @@ case "${1:-boot}" in
     apply "$2"
     ;;
   boot)
-    # From run-parts at boot: in the background, so a slow mount can never trip the
-    # webosbrew failsafe.
-    ( sleep 5; sh "$STATE/home.sh" apply boot ) </dev/null >/dev/null 2>&1 &
+    # From run-parts at boot (Homebrew Channel runs it about 40 s after the TV starts): at once,
+    # in the background, so a slow call can never trip the webosbrew failsafe.
+    ( sh "$STATE/home.sh" apply boot ) </dev/null >/dev/null 2>&1 &
     ;;
   *)
     say "usage: home.sh enable|disable|status|refresh"
