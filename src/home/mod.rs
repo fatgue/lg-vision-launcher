@@ -1573,11 +1573,11 @@ impl Home {
         let (cx, cy) = ((self.icon_next % per_row) * ICON_CELL, (self.icon_next / per_row) * ICON_CELL);
         self.icon_next += 1;
         renderer.upload(self.icon_atlas, cx, cy, icon.w as i32, icon.h as i32, gl::RGBA, &icon.pixels);
+        // Half a texel inside the cell: filtering at the edges must not pick up the neighbour
+        // (it showed as thin vertical lines where an icon meets its tile's fill).
         let a = ICON_ATLAS as f32;
-        self.icons.insert(
-            icon.app_id,
-            [cx as f32 / a, cy as f32 / a, (cx + icon.w as i32) as f32 / a, (cy + icon.h as i32) as f32 / a, icon.w as f32 / icon.h as f32],
-        );
+        let (x0, y0, x1, y1) = (cx as f32 + 0.5, cy as f32 + 0.5, (cx + icon.w as i32) as f32 - 0.5, (cy + icon.h as i32) as f32 - 0.5);
+        self.icons.insert(icon.app_id, [x0 / a, y0 / a, x1 / a, y1 / a, icon.w as f32 / icon.h as f32]);
     }
 
     pub fn notice(&mut self, notice: Notice) {

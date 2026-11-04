@@ -70,7 +70,8 @@ impl Home {
         self.brew_next += 1;
         renderer.upload(atlas, x, y, icon.w as i32, icon.h as i32, gl::RGBA, &icon.pixels);
         let (aw, ah) = (BRW_ATLAS.0 as f32, BRW_ATLAS.1 as f32);
-        let uv = [x as f32 / aw, y as f32 / ah, (x + icon.w as i32) as f32 / aw, (y + icon.h as i32) as f32 / ah];
+        // Half a texel inside the cell, so filtering never reaches the neighbouring icon.
+        let uv = [(x as f32 + 0.5) / aw, (y as f32 + 0.5) / ah, ((x + icon.w as i32) as f32 - 0.5) / aw, ((y + icon.h as i32) as f32 - 0.5) / ah];
         self.brew_icons.insert(icon.app_id, uv);
     }
 
