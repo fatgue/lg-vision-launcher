@@ -43,9 +43,11 @@ const TV_RECENT: usize = 2;
 const TV_FAVORITES: usize = 3;
 const TV_CATCHUP: usize = 4;
 const TV_COMING: usize = 5;
+/// Home Assistant: one tile per room; the focused room's devices in the row below it.
 const HOME: usize = 6;
-const INPUTS: usize = 7;
-const HIDDEN: usize = 8;
+const DEVICES: usize = 7;
+const INPUTS: usize = 8;
+const HIDDEN: usize = 9;
 /// Where the live preview plays in Cinematic (16:9, right of the hero text).
 pub const PREVIEW_RECT: Rect = Rect::new(1000.0, 150.0, 824.0, 464.0);
 /// Focus must rest this long on a channel before its preview starts.
@@ -118,6 +120,8 @@ enum Kind {
     Input { connected: bool },
     Media { progress: f32 },
     Entity { on: Option<bool> },
+    /// A Home Assistant room: how many of its lights are on.
+    Room { lights_on: usize, lights: usize },
     Setting { service: Service, connected: bool },
     Channel { id: i64 },
     Reminder { id: i64, start: i64 },
@@ -334,7 +338,7 @@ impl Picker {
 const ROW_KEYS: [(&str, &[usize]); 5] = [
     ("continue", &[CONTINUE]),
     ("tv", &[TV_RECENT, TV_FAVORITES, TV_CATCHUP, TV_COMING]),
-    ("home", &[HOME]),
+    ("home", &[HOME, DEVICES]),
     ("inputs", &[INPUTS]),
     ("hidden", &[HIDDEN]),
 ];
@@ -446,7 +450,10 @@ pub struct Home {
     brew_scroll: Spring,
     versions: HashMap<String, String>,
     strings: &'static Strings,
-    rails: [Rail; 9],
+    rails: [Rail; 10],
+    /// Home Assistant entities on Home (grouped into rooms) and the room the device row shows.
+    entities: Vec<Entity>,
+    devices_room: Option<String>,
     active: usize,
     mode: Mode,
     prefs: Prefs,
@@ -540,6 +547,7 @@ impl Home {
                 Rail::new(300.0, 150.0),
                 Rail::new(300.0, 150.0),
                 Rail::new(300.0, 150.0),
+                Rail::new(240.0, 124.0),
                 Rail::new(300.0, 120.0),
                 Rail::new(300.0, 170.0),
             ],
@@ -553,6 +561,8 @@ impl Home {
             offered: false,
             digits: None,
             pending: Vec::new(),
+            entities: Vec::new(),
+            devices_room: None,
             preview: None,
             dwell: None,
             preview_paused_until: None,
@@ -648,7 +658,7 @@ impl Home {
 
     /// Tile sizes and gaps per look (Cinematic keeps its original values).
     fn apply_look(&mut self) {
-        let sizes: [(f32, f32, f32); 9] = match self.look {
+        let sizes: [(f32, f32, f32); 10] = match self.look {
             Look::Cinematic => [
                 (300.0, 170.0, TILE_GAP),
                 (300.0, 170.0, TILE_GAP),
@@ -657,6 +667,7 @@ impl Home {
                 (300.0, 150.0, TILE_GAP),
                 (300.0, 150.0, TILE_GAP),
                 (300.0, 150.0, TILE_GAP),
+                (240.0, 124.0, TILE_GAP),
                 (300.0, 120.0, TILE_GAP),
                 (300.0, 170.0, TILE_GAP),
             ],
@@ -670,6 +681,7 @@ impl Home {
                     card,
                     card,
                     (glass::TILE.0, 130.0, glass::ROW_GAP),
+                    (210.0, 120.0, glass::ROW_GAP),
                     (glass::TILE.0, 100.0, glass::ROW_GAP),
                     (glass::TILE.0, glass::TILE.1, glass::ROW_GAP),
                 ]
@@ -777,7 +789,7 @@ impl Home {
         self.hit(x, y).is_some()
     }
 
-    fn rail_title(&self, rail: usize) -> &'static str {
+    fn rail_title(&self, rail: usize) -> &str {
         let s = self.strings;
         match rail {
             FAVORITES => s.favorites,
@@ -788,6 +800,8 @@ impl Home {
             TV_CATCHUP => s.catch_up,
             TV_COMING => s.tv_coming,
             HOME => s.home,
+            // The devices of the focused room: the room's name.
+            DEVICES => self.rails[HOME].tiles.get(self.rails[HOME].focus).map_or("", |t| t.title.as_str()),
             INPUTS => s.inputs,
             _ => s.hidden,
         }
@@ -916,23 +930,71 @@ impl Home {
     }
 
     pub fn set_entities(&mut self, entities: Vec<Entity>) {
+        self.entities = entities;
+        self.set_rooms();
+        self.devices_room = None;
+        self.fix_active();
+        self.refocus(false);
+    }
+
+    /// One tile per room (alphabetical, unassigned devices last), with how many lights are on.
+    fn set_rooms(&mut self) {
         let s = self.strings;
-        let tiles = entities
-            .into_iter()
+        let mut areas: Vec<&str> = self.entities.iter().map(|e| e.area.as_str()).collect();
+        areas.sort_by(|a, b| a.is_empty().cmp(&b.is_empty()).then_with(|| a.to_lowercase().cmp(&b.to_lowercase())));
+        areas.dedup();
+        let tiles = areas
+            .iter()
+            .enumerate()
+            .map(|(i, &area)| {
+                let devices: Vec<&Entity> = self.entities.iter().filter(|e| e.area == area).collect();
+                let lights: Vec<&&Entity> = devices.iter().filter(|e| e.category == HaCategory::Lights && e.on.is_some()).collect();
+                let lights_on = lights.iter().filter(|e| e.on == Some(true)).count();
+                let title = if area.is_empty() { s.room_other.to_string() } else { area.to_string() };
+                let mut tile = Tile::new(format!("room:{area}"), title, Kind::Room { lights_on, lights: lights.len() }, i);
+                tile.launch_id = area.to_string();
+                tile.detail = if lights.is_empty() && devices.len() == 1 {
+                    s.room_device_one.to_string()
+                } else if lights.is_empty() {
+                    s.room_devices.replace("{n}", &devices.len().to_string())
+                } else {
+                    s.room_lights.replace("{on}", &lights_on.to_string()).replace("{all}", &lights.len().to_string())
+                };
+                tile.bg = Rgba::hex(0x15171D);
+                tile.accent = if lights_on > 0 { Rgba::hex(0xF2C14E) } else { Rgba::hex(0x9AA3B2) };
+                tile
+            })
+            .collect();
+        self.rails[HOME].replace(tiles);
+    }
+
+    /// The device row follows the focused room (like tabs); only a change of room rebuilds it.
+    fn update_devices(&mut self) {
+        let room = self.rails[HOME].tiles.get(self.rails[HOME].focus).map(|t| t.launch_id.clone());
+        if room == self.devices_room {
+            return;
+        }
+        let s = self.strings;
+        let tiles = self
+            .entities
+            .iter()
+            .filter(|e| Some(&e.area) == room.as_ref())
             .enumerate()
             .map(|(i, entity)| {
-                let state = entity_state(s, &entity);
-                let detail = if entity.area.is_empty() { state } else { format!("{} · {state}", entity.area) };
-                let mut tile = Tile::new(entity.id, entity.name, Kind::Entity { on: entity.on }, i);
-                tile.detail = detail;
+                let mut tile = Tile::new(entity.id.clone(), entity.name.clone(), Kind::Entity { on: entity.on }, i);
+                tile.detail = entity_state(s, entity);
                 tile.bg = Rgba::hex(0x15171D);
                 tile.accent = if entity.on == Some(true) { Rgba::hex(0xF2C14E) } else { Rgba::hex(0x9AA3B2) };
                 tile
             })
             .collect();
-        self.rails[HOME].replace(tiles);
-        self.fix_active();
-        self.refocus(false);
+        let rail = &mut self.rails[DEVICES];
+        if room != self.devices_room {
+            rail.focus = 0;
+            rail.scroll = Spring::new(0.0, 16.0);
+        }
+        rail.replace(tiles);
+        self.devices_room = room;
     }
 
     pub fn set_status(&mut self, status: Status) {
@@ -1988,12 +2050,34 @@ impl Home {
             }
             Kind::Entity { on } => {
                 // Optimistic: lights flip at once; the next refresh confirms.
+                let id = tile.id.clone();
                 if let Some(on) = on {
                     tile.kind = Kind::Entity { on: Some(!on) };
                     tile.detail = if on { self.strings.off } else { self.strings.on }.to_string();
                     tile.accent = if on { Rgba::hex(0x9AA3B2) } else { Rgba::hex(0xF2C14E) };
+                    if let Some(entity) = self.entities.iter_mut().find(|e| e.id == id) {
+                        entity.on = Some(!on);
+                    }
+                    self.set_rooms();
                 }
-                Some(Action::Service(ServiceRequest::HaAction(tile.id.clone())))
+                Some(Action::Service(ServiceRequest::HaAction(id)))
+            }
+            Kind::Room { lights_on, .. } => {
+                // All the room's lights on, or off when any is on.
+                let area = tile.launch_id.clone();
+                let target = lights_on == 0;
+                let mut actions: Vec<Action> = Vec::new();
+                for entity in self.entities.iter_mut().filter(|e| e.area == area && e.category == HaCategory::Lights) {
+                    if entity.on.is_some_and(|on| on != target) {
+                        entity.on = Some(target);
+                        actions.push(Action::Service(ServiceRequest::HaAction(entity.id.clone())));
+                    }
+                }
+                self.set_rooms();
+                self.devices_room = None;
+                let first = (!actions.is_empty()).then(|| actions.remove(0));
+                self.pending.extend(actions);
+                first
             }
             Kind::Setting { service, connected } => self.open_setting(service, connected),
             Kind::Promo => self.open_store(),
@@ -2175,6 +2259,7 @@ impl Home {
     // ---- Animation ------------------------------------------------------------------
 
     fn refocus(&mut self, instant: bool) {
+        self.update_devices();
         let moving = matches!(self.mode, Mode::Move { .. });
         let overlay = matches!(
             self.mode,
@@ -2264,6 +2349,8 @@ impl Home {
             }
             (Kind::Channel { .. } | Kind::Reminder { .. } | Kind::Catchup { .. }, _) => (tile.detail.clone(), Some(s.press_ok_to_watch)),
             (Kind::Promo, _) => (tile.detail.clone(), Some(s.press_ok_for_details)),
+            (Kind::Room { lights: 0, .. }, _) => (tile.detail.clone(), None),
+            (Kind::Room { .. }, _) => (tile.detail.clone(), Some(s.press_ok_to_toggle)),
         };
         Hero { eyebrow, title: tile.title.clone(), sub, hint }
     }

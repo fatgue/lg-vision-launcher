@@ -206,6 +206,10 @@ fn run(started: Instant) -> Result<(), String> {
     if args.iter().any(|a| a == "--sample-weather") {
         home.set_weather(Some(sample_weather()));
     }
+    // --sample-home: Home Assistant devices in rooms on the desktop.
+    if args.iter().any(|a| a == "--sample-home") {
+        home.set_entities(sample_entities());
+    }
     let t_home = started.elapsed();
     let bus = if home_mode {
         let bus = register_home(sdl.waker())?;
@@ -852,4 +856,32 @@ fn sample_weather() -> model::Weather {
         days: [day(61, 12.0, 6.0), day(3, 13.0, 7.0), day(2, 15.0, 8.0), day(0, 17.0, 9.0), day(80, 14.0, 9.0), day(71, 4.0, -1.0)],
         day_count: 6,
     }
+}
+
+/// Home Assistant devices for desktop previews (`--sample-home`).
+fn sample_entities() -> Vec<model::Entity> {
+    use model::HaCategory::{Lights, Media, Scenes, Switches};
+    let entity = |id: &str, name: &str, category, area: &str, on: Option<bool>| model::Entity {
+        id: id.into(),
+        name: name.into(),
+        category,
+        area: area.into(),
+        state: match on {
+            Some(true) => "on".into(),
+            Some(false) => "off".into(),
+            None => "scening".into(),
+        },
+        on,
+        brightness: None,
+    };
+    vec![
+        entity("light.ceiling", "Ceiling", Lights, "Living room", Some(true)),
+        entity("light.floor", "Floor lamp", Lights, "Living room", Some(false)),
+        entity("light.tv", "TV backlight", Lights, "Living room", Some(true)),
+        entity("media_player.sonos", "Sonos", Media, "Living room", Some(false)),
+        entity("light.kitchen", "Counter", Lights, "Kitchen", Some(false)),
+        entity("switch.coffee", "Coffee machine", Switches, "Kitchen", Some(false)),
+        entity("light.bed", "Bedside", Lights, "Bedroom", Some(false)),
+        entity("scene.movie", "Movie night", Scenes, "", None),
+    ]
 }

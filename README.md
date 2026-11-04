@@ -22,7 +22,7 @@ Rust + SDL2 + a custom OpenGL ES 2 renderer, around 3 MB, no web view.
 - **Vision as Home:** the Home key opens Vision instead of LG's launcher, in about 50 ms (see below).
 - **Frees memory:** as Home, Vision closes the app that has been in the background longest when the TV runs low on memory (see below).
 - **Ambient light** taken from the focused tile, a large hero with what is focused, clock and weather.
-- **Home Assistant:** lights, switches and scenes as tiles, chosen by category and room. Set up from the phone via QR code.
+- **Home Assistant:** lights, switches and scenes, grouped by room: the focused room's devices appear in the row below it, and OK on a room turns all its lights on or off. Set up from the phone via QR code.
 - **Plex:** continue watching, linked through plex.tv/link.
 - **TiviOne (optional):** with the TiviOne IPTV app installed and connected, Vision shows recent and favourite channels, catch-up, upcoming reminders and a muted live preview of the focused channel; the number keys tune channels.
 - **Six languages:** English, German, French, Spanish, Italian, Turkish (follows the TV, can be changed).

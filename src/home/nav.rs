@@ -115,6 +115,9 @@ impl Home {
         match key {
             Key::Left if focus > 0 => self.rails[rail].focus -= 1,
             Key::Right if focus + 1 < count => self.rails[rail].focus += 1,
+            Key::Up if rail == DEVICES && at > 0 && rows[at - 1] == HOME => {
+                self.active = HOME;
+            }
             Key::Up if at > 0 => self.focus_row(rows[at - 1], self.row_center(rail, focus)),
             // Up from the first row: the grid's last row, at the nearest column.
             Key::Up => {
@@ -122,6 +125,9 @@ impl Home {
                 let column = ((x - glass::X0) / (glass::TILE.0 + glass::GAP)).floor().clamp(0.0, (COLS - 1) as f32) as usize;
                 let last_row = self.grid_total().saturating_sub(1) / COLS;
                 self.focus_grid(last_row * COLS + column);
+            }
+            Key::Down if rail == HOME && rows.get(at + 1) == Some(&DEVICES) => {
+                self.active = DEVICES;
             }
             Key::Down if at + 1 < rows.len() => self.focus_row(rows[at + 1], self.row_center(rail, focus)),
             Key::Ok => return self.activate(),

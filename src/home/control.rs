@@ -54,8 +54,12 @@ fn index_of(row: usize, column: usize) -> usize {
     ROWS[..row].iter().map(|r| r.len()).sum::<usize>() + column.min(ROWS[row].len() - 1)
 }
 
+/// Room under the round buttons for the focused one's name.
+const LABEL_SPACE: f32 = 44.0;
+
 fn item_rect(row: usize, column: usize) -> Rect {
-    let y = PANEL_Y + row as f32 * (PILL.1 + ITEM_GAP);
+    let below_circles = ROWS[..row].iter().any(|r| r.len() > 2);
+    let y = PANEL_Y + row as f32 * (PILL.1 + ITEM_GAP) + if below_circles { LABEL_SPACE } else { 0.0 };
     match ROWS[row].len() {
         1 => Rect::new(PANEL_X, y, PANEL_W, PILL.1),
         2 => Rect::new(PANEL_X + column as f32 * (PILL.0 + ITEM_GAP), y, PILL.0, PILL.1),

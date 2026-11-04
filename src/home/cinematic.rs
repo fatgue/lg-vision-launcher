@@ -226,7 +226,13 @@ pub(super) fn draw_tile_shapes(r: &mut Renderer, tile: &Tile, v: &TileView) {
             r.vgradient(rect, tile.bg.fade(alpha), Rgba::hex(0x0F5A5A).fade(alpha));
             r.rect(Rect::new(rect.x + 24.0, rect.y + rect.h - 30.0, 56.0, 6.0), 3.0, TIVIONE_TEAL.fade(alpha));
         }
-        Kind::Entity { on } => {
+        Kind::Entity { .. } | Kind::Room { .. } => {
+            let on = match tile.kind {
+                Kind::Room { lights: 0, .. } => None,
+                Kind::Room { lights_on, .. } => Some(lights_on > 0),
+                Kind::Entity { on } => on,
+                _ => None,
+            };
             let lamp = match on {
                 Some(true) => Rgba::hex(0xF2C14E),
                 Some(false) => TEXT.alpha(0.25),
@@ -294,7 +300,7 @@ pub(super) fn draw_tile_text(r: &mut Renderer, text: &mut Text, tile: &Tile, v: 
             r.rect(Rect::new(track.x, track.y, track.w * progress, track.h), 2.5, TEXT.alpha(0.95 * alpha));
             label_below(text, r);
         }
-        Kind::Entity { .. } => {
+        Kind::Entity { .. } | Kind::Room { .. } => {
             let style = fit(text, r, &tile.title, ENTITY_NAME, rect.w - 48.0);
             text.draw(r, &tile.title, rect.x + 24.0, rect.y + rect.h - 52.0, style, TEXT.alpha(alpha));
             text.draw(r, &tile.detail, rect.x + 24.0, rect.y + rect.h - 22.0, INPUT_SUB, TEXT.alpha(0.6 * alpha));

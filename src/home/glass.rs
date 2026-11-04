@@ -68,7 +68,7 @@ impl Home {
     /// Rails shown as rows under the grid, top to bottom. While TiviOne is missing, its tile
     /// row (the promotion) is one of them; with TiviOne the TV rails live in the shelf.
     pub(super) fn glass_rows(&self) -> impl Iterator<Item = usize> + '_ {
-        [TV_RECENT, HOME, INPUTS, HIDDEN].into_iter().filter(move |&r| self.has(r) && (r != TV_RECENT || self.tv.is_none()))
+        [TV_RECENT, HOME, DEVICES, INPUTS, HIDDEN].into_iter().filter(move |&r| self.has(r) && (r != TV_RECENT || self.tv.is_none()))
     }
 
     /// A row's title, before scrolling.
