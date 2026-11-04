@@ -250,6 +250,7 @@ impl Home {
         // The header and the shelf scroll away as lower rows take focus.
         let fade = (1.0 + v / 360.0).clamp(0.0, 1.0);
         self.glass_wallpaper(r, fade, open);
+        self.draw_visi_back(r);
         if fade > 0.01 {
             self.glass_shelf(r, text, fade);
         }
@@ -270,6 +271,7 @@ impl Home {
         self.glass_dock(r, v);
         self.glass_grid(r, text, v);
         self.glass_row_tiles(r, text, v);
+        self.draw_visi(r);
         self.draw_inputs(r, text);
         self.draw_control(r, text);
         self.draw_menu(r, text);
@@ -329,12 +331,14 @@ impl Home {
         };
         if self.prefs.ui.clock_style == "inline" {
             let line = if date.is_empty() { clock.to_string() } else { format!("{date}   {clock}") };
-            shadowed(text, r, &line, X0, 58.0, GLASS_DATE, alpha);
+            self.clock_rect.set(Rect::new(X0, 58.0, text.measure(r, &line, GLASS_DATE), GLASS_DATE.size));
+            shadowed(text, r, &line, X0, 58.0, GLASS_DATE, alpha * self.visi_clock());
             weather_line(text, r, 112.0);
             return;
         }
         // Stacked: a large clock, the date, the weather and the next days.
-        shadowed(text, r, clock, X0 - 6.0, 30.0, GLASS_BIG_CLOCK, 0.92 * alpha);
+        self.clock_rect.set(Rect::new(X0 - 6.0, 30.0 + GLASS_BIG_CLOCK.size * 0.12, text.measure(r, clock, GLASS_BIG_CLOCK), GLASS_BIG_CLOCK.size * 0.85));
+        shadowed(text, r, clock, X0 - 6.0, 30.0, GLASS_BIG_CLOCK, 0.92 * alpha * self.visi_clock());
         let mut top = 214.0;
         if !date.is_empty() {
             shadowed(text, r, date, X0, top, GLASS_DATE, 0.9 * alpha);
@@ -395,7 +399,7 @@ impl Home {
                     if pass == 0 && browse {
                         self.hits.borrow_mut().push((rect, Target::Tile { rail, index: i }));
                     }
-                    self.glass_tile(r, text, pass, tile, rect, f, fade, CARD_RADIUS);
+                    self.glass_tile(r, text, pass, (rail, i), tile, rect, f, fade, CARD_RADIUS);
                 }
             }
         }
@@ -418,7 +422,7 @@ impl Home {
                     self.hits.borrow_mut().push((rect, Target::Tile { rail: FAVORITES, index: i }));
                 }
                 self.wiggle_tile(r, rect, i);
-                self.glass_tile(r, text, pass, tile, rect, f, 1.0, RADIUS);
+                self.glass_tile(r, text, pass, (FAVORITES, i), tile, rect, f, 1.0, RADIUS);
                 r.set_rotation(None);
                 if pass == 3 && f > 0.01 {
                     // The name under the focused app: below the dock for the first row.
@@ -466,7 +470,7 @@ impl Home {
                     if pass == 0 && browse {
                         self.hits.borrow_mut().push((rect, Target::Tile { rail, index: i }));
                     }
-                    self.glass_tile(r, text, pass, tile, rect, f, 1.0, RADIUS);
+                    self.glass_tile(r, text, pass, (rail, i), tile, rect, f, 1.0, RADIUS);
                 }
             }
         }
@@ -474,7 +478,11 @@ impl Home {
 
     /// One tile in one pass (shapes → artwork → icons → text keeps texture switches low).
     /// Focus: larger and lifted on a soft shadow.
-    fn glass_tile(&self, r: &mut Renderer, text: &mut Text, pass: usize, tile: &Tile, rect: Rect, f: f32, alpha: f32, radius: f32) {
+    #[allow(clippy::too_many_arguments)]
+    fn glass_tile(&self, r: &mut Renderer, text: &mut Text, pass: usize, key: (usize, usize), tile: &Tile, rect: Rect, f: f32, alpha: f32, radius: f32) {
+        // Visi's mischief: moved, turned, burnt, or in pieces (drawn by `draw_visi`).
+        let Some((rect, shown)) = self.visi_begin(r, key.0, key.1, rect) else { return };
+        let alpha = alpha * shown;
         let view = TileView {
             now: if pass == 3 { self.channel_now(tile) } else { None },
             rect,
@@ -497,6 +505,12 @@ impl Home {
             1 => draw_tile_art(r, self.art_atlas, &view),
             2 => draw_tile_icon(r, self.icon_atlas, &view),
             _ => draw_tile_text(r, text, tile, &view, self.strings),
+        }
+        if self.visi.is_some() {
+            if pass == 3 {
+                self.visi_marks(r, key.0, key.1, rect, radius);
+            }
+            self.visi_end(r);
         }
     }
 }

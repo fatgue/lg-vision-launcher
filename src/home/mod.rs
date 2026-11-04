@@ -7,6 +7,7 @@ mod homebrew;
 mod nav;
 mod tv;
 mod overlays;
+mod visi;
 
 use chrome::*;
 
@@ -392,6 +393,8 @@ enum SettingId {
     PreviewSingle,
     /// The intro when Vision starts.
     Intro,
+    /// Minutes before Visi comes by.
+    Visi,
     /// A row of Settings > TV (an index into `tv::TV_ROWS`).
     Tv(usize),
     Info,
@@ -534,6 +537,17 @@ pub struct Home {
     picture_loaded: [bool; crate::installer::MAX_PICTURES],
     pictures_requested: bool,
     pub loaded: bool,
+    /// Visi, the drone, while it is on screen; its sprite once decoded (None inside: failed).
+    visi: Option<visi::Visi>,
+    visi_sprite: Option<Option<Texture>>,
+    visi_decoding: Option<std::sync::mpsc::Receiver<Result<(Vec<u8>, usize, usize), String>>>,
+    /// Since when nothing happened on Home (Visi comes after a while), a show asked for by
+    /// `--visi`, and its fixed seed.
+    idle_since: Instant,
+    visi_now: bool,
+    visi_seed: Option<u32>,
+    /// Where the clock was drawn last (Visi may burn it).
+    clock_rect: std::cell::Cell<Rect>,
 }
 
 impl Home {
@@ -624,6 +638,13 @@ impl Home {
             picture_loaded: [false; crate::installer::MAX_PICTURES],
             pictures_requested: false,
             loaded: false,
+            visi: None,
+            visi_sprite: None,
+            visi_decoding: None,
+            idle_since: Instant::now(),
+            visi_now: false,
+            visi_seed: None,
+            clock_rect: std::cell::Cell::new(Rect::new(0.0, 0.0, 0.0, 0.0)),
         };
         home.apply_look();
         if home.look == Look::Glass {
@@ -729,6 +750,9 @@ impl Home {
 
     /// Moves focus to whatever the pointer is over. Returns true when something changed.
     pub fn pointer(&mut self, x: f32, y: f32) -> bool {
+        if self.visi_interrupt() {
+            return true;
+        }
         let Some((_, target)) = self.hit_rect(x, y) else { return false };
         if matches!(self.mode, Mode::Homebrew(_)) {
             let changed = self.brew_pointer(target);
@@ -1404,9 +1428,19 @@ impl Home {
         self.preview.take().is_some()
     }
 
+    /// `--visi`: Visi's show starts on the next frame (with a fixed seed: the same show).
+    pub fn start_visi(&mut self, seed: Option<u32>) {
+        self.visi_now = true;
+        self.visi_seed = seed;
+    }
+
     /// Visibility of Vision's window: a hidden Home stops its preview at once.
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
+        self.idle_since = Instant::now();
+        if !visible {
+            self.visi = None;
+        }
         if visible {
             self.preview_paused_until = None;
         } else {
@@ -1428,6 +1462,7 @@ impl Home {
                     && self.preview_paused_until.is_none_or(|until| Instant::now() >= until)
                     && matches!(self.mode, Mode::Browse)
                     && !self.header
+                    && self.visi.is_none()
                     && tv.streams.contains_key(&id) =>
             {
                 Some(id)
@@ -1612,6 +1647,10 @@ impl Home {
     // ---- Input ----------------------------------------------------------------------
 
     pub fn key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
+        // During Visi's show a key only ends it.
+        if self.visi_interrupt() {
+            return None;
+        }
         let action = match &self.mode {
             Mode::Menu(_) => self.menu_key(key),
             Mode::Move { .. } if self.look == Look::Glass && self.active == FAVORITES => self.glass_move_key(key),
@@ -1721,6 +1760,12 @@ impl Home {
             item(SettingId::Preview, s.live_preview, onoff(ui.preview), Some(ui.preview)),
             item(SettingId::PreviewSingle, s.preview_single, onoff(ui.preview_single), Some(ui.preview_single)),
             item(SettingId::Intro, s.intro, onoff(ui.intro), Some(ui.intro)),
+            item(
+                SettingId::Visi,
+                s.visi,
+                if ui.visi_minutes == 0 { s.off.to_string() } else { s.minutes.replace("{n}", &ui.visi_minutes.to_string()) },
+                None,
+            ),
         ]);
         let language = match crate::strings::LANGUAGES.iter().find(|(code, _, _)| *code == ui.language) {
             Some((_, name, _)) => name.to_string(),
@@ -1884,6 +1929,11 @@ impl Home {
             SettingId::Preview => ui.preview = !ui.preview,
             SettingId::PreviewSingle => ui.preview_single = !ui.preview_single,
             SettingId::Intro => ui.intro = !ui.intro,
+            SettingId::Visi => {
+                let choices = crate::storage::VISI_MINUTES;
+                let at = choices.iter().position(|&m| m == ui.visi_minutes).unwrap_or(0);
+                ui.visi_minutes = choices[(at + 1) % choices.len()];
+            }
             SettingId::FreeMemory => ui.free_memory = !ui.free_memory,
             SettingId::Tv(row) => return self.tv_change(row),
             SettingId::ClockStyle => ui.clock_style = if ui.clock_style == "inline" { "stacked" } else { "inline" }.to_string(),
@@ -2498,6 +2548,7 @@ impl Home {
                 moving = true;
             }
         }
+        moving |= self.visi_tick(dt);
         self.update_preview();
         if let Some((_, last)) = &self.digits {
             if last.elapsed() >= DIGIT_WAIT {

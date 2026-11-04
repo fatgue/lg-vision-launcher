@@ -201,6 +201,11 @@ fn run(started: Instant) -> Result<(), String> {
     );
     let t_glyphs = started.elapsed();
     let free_memory = prefs.ui.free_memory;
+    let record = args.iter().position(|a| a == "--record").and_then(|i| {
+        let dir = PathBuf::from(args.get(i + 1)?);
+        let every: u32 = args.get(i + 2).and_then(|n| n.parse().ok()).unwrap_or(2).max(1);
+        Some((dir, every))
+    });
     // The intro on a cold start; scripted runs (screenshots, benchmarks) skip it unless --intro.
     let mut intro = (prefs.ui.intro && (options.frames.is_none() || args.iter().any(|a| a == "--intro"))).then(intro::Intro::new);
     let mut home = Home::new(&renderer, prefs, look);
@@ -208,6 +213,11 @@ fn run(started: Instant) -> Result<(), String> {
     // --sample-weather: weather and a forecast on the desktop (no location there).
     if args.iter().any(|a| a == "--sample-weather") {
         home.set_weather(Some(sample_weather()));
+    }
+    // --visi [--visi-seed N]: Visi's show starts at once (the same show for the same seed).
+    if args.iter().any(|a| a == "--visi") {
+        let seed = args.iter().position(|a| a == "--visi-seed").and_then(|i| args.get(i + 1)).and_then(|n| n.parse().ok());
+        home.start_visi(seed);
     }
     // --sample-home: Home Assistant devices in rooms on the desktop.
     if args.iter().any(|a| a == "--sample-home") {
@@ -358,7 +368,7 @@ fn run(started: Instant) -> Result<(), String> {
                         }
                     }
                 }
-                sdl::MOUSEBUTTONDOWN if event.mouse_button() == 1 => {
+                sdl::MOUSEBUTTONDOWN if event.mouse_button() == 1 && options.frames.is_none() => {
                     pointer_lock = None;
                     let (x, y) = event.mouse_xy();
                     let (lx, ly) = to_logical(&sdl, window, x, y);
@@ -532,6 +542,12 @@ fn run(started: Instant) -> Result<(), String> {
         renderer.end();
         let submitted = Instant::now();
         let last = options.frames.is_some_and(|n| frames + 1 >= n);
+        // --record <dir> <every>: every n-th frame as a PNG (for the README's animations).
+        if let Some((dir, every)) = &record {
+            if frames % every == 0 {
+                save_screenshot(&renderer, (w, h), &dir.join(format!("f{frames:05}.png")))?;
+            }
+        }
         if last {
             if let Some(path) = &options.screenshot {
                 save_screenshot(&renderer, (w, h), path)?;

@@ -158,6 +158,7 @@ pub struct Renderer {
     bound: u32,
     /// Rotation applied to the next quads' positions: centre x/y, cos, sin.
     rotation: Option<[f32; 4]>,
+    offset: [f32; 2],
     pub stats: FrameStats,
 }
 
@@ -232,6 +233,7 @@ impl Renderer {
             vertices: Vec::with_capacity(MAX_QUADS * 4),
             bound: 0,
             rotation: None,
+            offset: [0.0; 2],
             stats: FrameStats::default(),
         })
     }
@@ -332,6 +334,7 @@ impl Renderer {
                 }
                 None => [x, y],
             };
+            let pos = [pos[0] + self.offset[0], pos[1] + self.offset[1]];
             self.vertices.push(Vertex {
                 pos,
                 uv: [u, v],
@@ -341,6 +344,11 @@ impl Renderer {
                 kind,
             });
         }
+    }
+
+    /// Moves everything drawn next by (dx, dy) (screen shake); (0, 0) stops.
+    pub fn set_offset(&mut self, dx: f32, dy: f32) {
+        self.offset = [dx, dy];
     }
 
     /// Turns everything drawn next by `angle` radians around (cx, cy); None stops.

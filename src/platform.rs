@@ -101,6 +101,8 @@ mod backend {
             let id = i as i64 + 1;
             feed.channels.insert(id, TvChannel { name: name.to_string(), number: Some(id as u32) });
             feed.numbers.insert(id as u32, id);
+            // A stream for each, so the preview window opens (nothing plays on the desktop).
+            feed.streams.insert(id, crate::video::Stream { url: format!("sample://{id}"), user_agent: None, referer: None });
             feed.guide.insert(
                 id,
                 vec![

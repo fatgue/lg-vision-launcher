@@ -20,6 +20,9 @@ pub fn data_dir(webos: bool) -> PathBuf {
         .join("vision")
 }
 
+/// The choices for `visi_minutes`.
+pub const VISI_MINUTES: [u8; 4] = [0, 2, 5, 10];
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Prefs {
     /// Favourites in the user's order; apps not listed follow in LG's order.
@@ -58,6 +61,8 @@ pub struct UiPrefs {
     pub quick_start_offered: bool,
     /// The intro when Vision starts (power on, after an update).
     pub intro: bool,
+    /// Minutes without input on Home before Visi, the drone, comes by (0: never).
+    pub visi_minutes: u8,
     /// The live preview also when the provider allows a single connection (TiviOne then waits
     /// a moment when it takes over).
     pub preview_single: bool,
@@ -85,6 +90,7 @@ impl Default for UiPrefs {
             clock_style: "stacked".into(),
             quick_start_offered: false,
             intro: true,
+            visi_minutes: 5,
             preview_single: true,
             room_order: Vec::new(),
             device_order: Vec::new(),
@@ -137,6 +143,10 @@ impl Prefs {
             clock_style: ui.and_then(|u| u.get("clockStyle")).and_then(Value::as_str).unwrap_or(&defaults.clock_style).to_string(),
             quick_start_offered: flag("quickStartOffered", defaults.quick_start_offered),
             intro: flag("intro", defaults.intro),
+            visi_minutes: ui
+                .and_then(|u| u.get("visiMinutes"))
+                .and_then(Value::as_u64)
+                .map_or(defaults.visi_minutes, |m| VISI_MINUTES.iter().copied().find(|&v| v as u64 == m).unwrap_or(defaults.visi_minutes)),
             preview_single: flag("previewSingle", defaults.preview_single),
             room_order: strings("roomOrder"),
             device_order: strings("deviceOrder"),
@@ -170,6 +180,7 @@ impl Prefs {
                 "clockStyle": ui.clock_style,
                 "quickStartOffered": ui.quick_start_offered,
                 "intro": ui.intro,
+                "visiMinutes": ui.visi_minutes,
                 "previewSingle": ui.preview_single,
                 "roomOrder": ui.room_order,
                 "deviceOrder": ui.device_order,

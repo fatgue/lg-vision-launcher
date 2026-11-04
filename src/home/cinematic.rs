@@ -3,9 +3,17 @@ use super::*;
 
 impl Home {
     pub fn draw(&mut self, r: &mut Renderer, text: &mut Text, now: &chrono::DateTime<chrono::Local>) {
+        // Visi's explosions shake the whole screen.
+        let shake = self.visi.as_ref().map(|v| v.shake());
+        if let Some((dx, dy)) = shake {
+            r.set_offset(dx, dy);
+        }
         match self.look {
             Look::Cinematic => self.draw_cinematic(r, text, now),
             Look::Glass => self.draw_glass(r, text, now),
+        }
+        if shake.is_some() {
+            r.set_offset(0.0, 0.0);
         }
     }
 
@@ -31,6 +39,7 @@ impl Home {
         self.hits.borrow_mut().clear();
         let (clock, date) = self.clock_and_date(now);
         self.draw_backdrop(r);
+        self.draw_visi_back(r);
         if self.preview.is_some() {
             r.punch(PREVIEW_RECT);
             r.stroke(PREVIEW_RECT.inflate(1.0), 4.0, 1.5, TEXT.alpha(0.25));
@@ -41,6 +50,7 @@ impl Home {
         self.draw_header(r, text, &clock, &date);
         self.draw_hero(r, text);
         self.draw_rails(r, text);
+        self.draw_visi(r);
         self.draw_menu(r, text);
         self.draw_setup(r, text);
         self.draw_offer(r, text);
@@ -76,7 +86,8 @@ impl Home {
         }
         let clock_w = text.measure(r, clock, CLOCK);
         let mut x = gear.x - 36.0 - clock_w;
-        text.draw(r, clock, x, SAFE_TOP + 39.0, CLOCK, TEXT);
+        self.clock_rect.set(Rect::new(x, SAFE_TOP + 39.0 - CLOCK.size * 0.8, clock_w, CLOCK.size));
+        text.draw(r, clock, x, SAFE_TOP + 39.0, CLOCK, TEXT.alpha(self.visi_clock()));
         if !date.is_empty() {
             x -= 40.0 + text.measure(r, date, HEADER);
             text.draw(r, date, x, SAFE_TOP + 37.0, HEADER, TEXT.alpha(0.78));
@@ -146,11 +157,20 @@ impl Home {
                     if pass == 0 && alpha > 0.5 && matches!(self.mode, Mode::Browse) {
                         self.hits.borrow_mut().push((rect, Target::Tile { rail: index, index: i }));
                     }
+                    // Visi's mischief: moved, turned, burnt, or in pieces (drawn by `draw_visi`).
+                    let Some((rect, shown)) = self.visi_begin(r, index, i, rect) else { continue };
+                    let view = TileView { rect, alpha: alpha * shown, ..view };
                     match pass {
                         0 => draw_tile_shapes(r, tile, &view),
                         1 => draw_tile_art(r, self.art_atlas, &view),
                         2 => draw_tile_icon(r, self.icon_atlas, &view),
                         _ => draw_tile_text(r, text, tile, &view, self.strings),
+                    }
+                    if self.visi.is_some() {
+                        if pass == 3 {
+                            self.visi_marks(r, index, i, rect, TILE_RADIUS);
+                        }
+                        self.visi_end(r);
                     }
                 }
             }
