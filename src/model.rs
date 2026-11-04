@@ -119,6 +119,8 @@ pub struct TvFeed {
     pub streams: std::collections::HashMap<i64, crate::video::Stream>,
     pub guide: std::collections::HashMap<i64, Vec<Programme>>,
     pub numbers: std::collections::HashMap<u32, i64>,
+    /// Streams the IPTV provider allows at once (None: unknown).
+    pub max_connections: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +183,7 @@ impl TvFeed {
             .unwrap_or_default();
         Some(Self {
             playlist_id: value.get("playlistId").and_then(Value::as_i64).unwrap_or(0),
+            max_connections: value.get("maxConnections").and_then(Value::as_u64).map(|n| n as u32),
             channels,
             favorites: ids("favorites"),
             recent: ids("recent"),

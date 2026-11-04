@@ -388,6 +388,8 @@ enum SettingId {
     ClockStyle,
     /// Install the newer Vision release.
     VisionUpdate,
+    /// The live preview with a single-connection provider.
+    PreviewSingle,
     /// A row of Settings > TV (an index into `tv::TV_ROWS`).
     Tv(usize),
     Info,
@@ -1419,6 +1421,8 @@ impl Home {
             (Some(Kind::Channel { id }), Some(tv))
                 if self.visible
                     && self.prefs.ui.preview
+                    // A single-connection provider: only when the user wants it there too.
+                    && (self.prefs.ui.preview_single || tv.max_connections != Some(1))
                     && self.preview_paused_until.is_none_or(|until| Instant::now() >= until)
                     && matches!(self.mode, Mode::Browse)
                     && !self.header
@@ -1713,6 +1717,7 @@ impl Home {
         appearance.extend([
             item(SettingId::Motion, s.motion, if ui.reduced_motion { s.reduced } else { s.full }.to_string(), None),
             item(SettingId::Preview, s.live_preview, onoff(ui.preview), Some(ui.preview)),
+            item(SettingId::PreviewSingle, s.preview_single, onoff(ui.preview_single), Some(ui.preview_single)),
         ]);
         let language = match crate::strings::LANGUAGES.iter().find(|(code, _, _)| *code == ui.language) {
             Some((_, name, _)) => name.to_string(),
@@ -1874,6 +1879,7 @@ impl Home {
             SettingId::Ambient => ui.ambient = (ui.ambient + 1) % 4,
             SettingId::Motion => ui.reduced_motion = !ui.reduced_motion,
             SettingId::Preview => ui.preview = !ui.preview,
+            SettingId::PreviewSingle => ui.preview_single = !ui.preview_single,
             SettingId::FreeMemory => ui.free_memory = !ui.free_memory,
             SettingId::Tv(row) => return self.tv_change(row),
             SettingId::ClockStyle => ui.clock_style = if ui.clock_style == "inline" { "stacked" } else { "inline" }.to_string(),
@@ -2077,9 +2083,16 @@ impl Home {
         if self.focused().is_some_and(|t| t.id == homebrew::HOMEBREW_TILE) {
             return self.open_homebrew();
         }
+        // TiviOne takes over from the preview: it waits a moment for the provider.
+        let handoff = self.preview.is_some();
         let rail = &mut self.rails[self.active];
         let tile = rail.tiles.get_mut(rail.focus)?;
         match tile.kind {
+            Kind::Channel { .. } | Kind::Catchup { .. } if handoff => {
+                let mut params = tile.params.clone().unwrap_or_else(|| serde_json::json!({}));
+                params["previewHandoff"] = serde_json::json!(true);
+                Some(Action::Launch { app_id: tile.launch_id.clone(), params: Some(params) })
+            }
             Kind::App | Kind::Input { .. } | Kind::Media { .. } | Kind::Channel { .. } | Kind::Reminder { .. } | Kind::Catchup { .. } => {
                 Some(Action::Launch { app_id: tile.launch_id.clone(), params: tile.params.clone() })
             }
