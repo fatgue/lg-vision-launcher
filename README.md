@@ -1,7 +1,14 @@
-# Vision
+<p align="center">
+  <img src="docs/media/visi.png" width="240" alt="Visi, Vision's mascot">
+</p>
 
-A fast, native home launcher for rooted LG webOS TVs (developed on an LG CX, webOS 5).
-Rust + SDL2 + a custom OpenGL ES 2 renderer, around 3 MB, no web view.
+<h1 align="center">Vision</h1>
+
+<p align="center">
+  A fast, native home launcher for rooted LG webOS TVs (developed on an LG CX, webOS 5).<br>
+  Rust + SDL2 + a custom OpenGL ES 2 renderer, around 3 MB, no web view.<br>
+  <sub>Say hello to <b>Visi</b>, Vision's little drone: <a href="#meet-visi">leave your TV alone for a while and it shows up</a>.</sub>
+</p>
 
 > **🍺 Homebrew app store built in.** Browse every app of the webOS Homebrew repository right from
 > your home screen, and install, update or uninstall it with one click. No PC, no Dev Manager.
@@ -29,6 +36,7 @@ Rust + SDL2 + a custom OpenGL ES 2 renderer, around 3 MB, no web view.
 - **Magic Remote:** point to focus, click to open, hold for options, wheel to step along a row.
 - **Two looks:** Cinematic and Glass (see below), switchable in Settings while Vision runs.
 - **Intro:** when the TV starts, a short cinematic intro: "VISION" in steel with depth, a sweeping light and an anamorphic flare, drawn live (any key skips it; Settings → Appearance → Intro on start).
+- **[Visi](#meet-visi), the drone:** leave Home alone for a few minutes and a small drone flies in and wrecks the place: it knocks tiles off the dock and juggles them, lasers a hole into the screen and flies through it, burns the clock away, cracks the TV's glass, spins up a tornado, and more, a different show every time. Tiles and their pieces fall with real physics. Then it rewinds everything and leaves; nothing really changes, and any key ends the show at once (Settings → Appearance: off, 2, 5 or 10 minutes).
 
 ## Homebrew app store
 
@@ -59,7 +67,7 @@ settings screens, not just colours. Switch it in **Settings → Appearance → T
 **Cinematic:** a large title over ambient light from the focused tile, with rows of apps, channels,
 Home Assistant tiles and inputs.
 
-![Cinematic](docs/screenshots/cinematic-home.jpg)
+![Cinematic: moving through the rows into Settings](docs/media/cinematic.gif)
 
 **Glass:** a photo wallpaper with the first row of apps in a frosted glass dock and more rows below
 it. At the top left a large clock with the date, the weather and a five-day forecast (or date and time
@@ -77,6 +85,8 @@ above the dock, and Up opens them with programme details and the live preview.
   Photo from your phone**). The glass is a blurred copy of the wallpaper seen through the shapes, made
   once: nothing is blurred while drawing. Glass uses the Inter typeface and Material Symbols.
 
+![Glass: the dock, the Top Shelf, rooms and devices, the Control Center and Settings](docs/media/glass.gif)
+
 | | |
 |---|---|
 | ![Glass home](docs/screenshots/glass-home.jpg) | ![The Control Center](docs/screenshots/glass-control.jpg) |
@@ -91,6 +101,7 @@ Performance comes first. Measured on the CX (Mali-G51):
 | Cold start to first frame | ~250 ms (~430 ms on the first start after an update) |
 | Home key to Vision (already running) | ~50 ms |
 | CPU work per frame while navigating | ~1 ms (max ~4 ms) |
+| CPU work per frame during Visi's show | ~2–3.5 ms |
 | Frame rate | 50 fps (the TV's UI refresh), steady |
 | GPU when idle | 0 % (draws only when something changes) |
 | Draw calls per frame | 1–3 |
@@ -131,6 +142,48 @@ features; Vision only shows what TiviOne shares with it, and only after you agre
   day; Premium is bought inside TiviOne.
 - Connecting is opt-in: TiviOne opens once to pair, then shares an encrypted snapshot (channels, recent,
   favourites, guide, catch-up) through a local file. **Settings → Connections → TiviOne** turns it off again.
+- **Live preview:** rest on a channel for a moment and it plays, muted, right on the home screen (on the TV's
+  video plane, so it costs Vision nothing). **OK** opens it in TiviOne. With a provider that allows only one
+  stream, TiviOne waits a moment for the preview to let go (**Settings → Appearance → Preview with a
+  one-stream provider** turns the preview off for such providers).
+
+| Glass | Cinematic |
+|---|---|
+| ![The TiviOne live preview in Glass](docs/media/tivione-glass.gif) | ![The TiviOne live preview in Cinematic](docs/media/tivione-cinematic.gif) |
+
+<sub>Recorded on the desktop build, where nothing plays: the pictures in the preview window stand in for the channels.</sub>
+
+## Meet Visi
+
+<img src="docs/media/visi.png" width="140" align="right" alt="Visi">
+
+Visi is Vision's mascot, a small hover drone with a big lens. Leave the home screen alone for a few
+minutes and Visi flies in and makes a mess of it: a different show of eight acts every time, out of these:
+
+- **Shoves** a tile off the dock (it takes its neighbour with it), **grabs** one and drops it,
+  **juggles** one with its head, **sucks** one in (and burps).
+- **Lasers** a row of tiles, fires a **rocket** that blows a tile into pieces, **headbutts** one in two.
+- Spins up a **tornado** that whirls three tiles around and flings them away.
+- **Burns the clock** away, **draws a smiley** on the wall with its laser.
+- Flies off into the **depth of the room**, behind the tiles, and back out.
+- **Lasers a hole** into the screen, flies through it and comes out of another one.
+- Takes a run-up and **crashes into the TV's glass**: cracks across the whole picture, and Visi, squashed
+  flat, slides down.
+- Throws a **disco** with confetti, or spins until it is **dizzy**, drops to the floor, sees stars and reboots.
+
+Loose tiles and their pieces are rigid bodies: they fall, land on their corners, bounce and tip over.
+Visi turns in 3D (eight views of the drone, blended as it turns) and tilts into its moves like a real
+quadcopter. In the end it **rewinds everything**, and nothing has really changed: the order of your apps
+and all data stay as they were. **Any key ends the show at once** (and does nothing else).
+
+| Cinematic | Glass |
+|---|---|
+| ![Visi in Cinematic: a rocket, the cracked glass, a smiley, juggling](docs/media/visi-cinematic.gif) | ![Visi in Glass: a tornado, disco, the burnt clock, a hole in the screen](docs/media/visi-glass.gif) |
+
+Choose when Visi comes (or turn it off) in **Settings → Appearance → Visi drone when idle**: off, after
+2, 5 (default) or 10 minutes. It never comes while a live preview plays, a menu is open or *Motion* is set
+to *Reduced*. A show costs about 2–3.5 ms of CPU per frame on the CX, at a steady 50 fps; the rest of the
+time it costs nothing.
 
 ## Using it
 
@@ -145,7 +198,7 @@ features; Vision only shows what TiviOne shares with it, and only after you agre
   - Clock: 24- or 12-hour, date, clock style (Glass)
   - Home button: Vision as Home on or off
   - Rows: show or hide each row
-  - Appearance: theme, wallpaper and a photo from your phone (Glass), ambient light (Cinematic), motion, live preview, intro on start
+  - Appearance: theme, wallpaper and a photo from your phone (Glass), ambient light (Cinematic), motion, live preview, intro on start, Visi drone
   - System: Vision update (when there is one), language, closing unused apps when memory is low (as Home), reload app images, version
   - TV: the TV's own settings: Home when the TV turns on, Quick Start+, picture mode, brightness and contrast
     (Left / Right), energy saving, Ultra HD Deep Colour per HDMI input, sound mode and output, sleep timer, auto power
@@ -203,6 +256,8 @@ node scripts/make-icons.mjs     # generate the app icons (once)
 cargo run                       # desktop preview with sample data
 cargo run -- --frames 120 --keys down,ok --screenshot shot.png
                                 # (`wait` in --keys skips a step; VISION_WEBOS=10 plays a webOS 10 TV)
+cargo run -- --visi --visi-seed 7 # Visi's show at once (the same show for the same seed)
+cargo run -- --frames 600 --record frames/ 4   # every 4th frame as a PNG (the README's animations)
 
 node scripts/package.mjs        # TV build (ARMv7 softfp, glibc 2.28) + IPK in out/
 node scripts/tv.mjs install     # upload to the TV and install
@@ -223,7 +278,7 @@ src/main.rs       event loop, window and GL context, frame timing
 src/render.rs     GLES2 batch renderer (SDF shader)
 src/text.rs       glyph atlas (fontdue)
 src/home/         home screen: state and focus (mod.rs), the Cinematic and Glass looks,
-                  navigation, settings and pages (TiviOne, Homebrew)
+                  navigation, settings and pages (TiviOne, Homebrew), Visi (visi.rs)
 src/theme.rs      design tokens
 src/platform.rs   TV services worker (desktop: sample data)
 src/services.rs   weather, Home Assistant, Plex, TiviOne snapshot
@@ -242,4 +297,5 @@ Vision is released under the [MIT licence](LICENSE). Not affiliated with LG Elec
 - Inter (typeface, Glass): SIL Open Font License 1.1 (`assets/fonts/Inter-OFL.txt`), subset to Latin
 - Material Symbols Rounded (icons): Apache License 2.0 (`assets/fonts/MaterialSymbols-LICENSE.txt`), subset to the icons Vision uses
 - Wallpapers: CC0 photos from Wikimedia Commons (`assets/wallpapers/CREDITS.txt`)
+- Visi (`assets/visi.png`, `docs/media/visi.png`): made for Vision with Krea 2 and Qwen-Image-Edit (Apache 2.0), part of Vision under its MIT licence; so are the channel pictures in the preview animations
 - The Home takeover follows the approach of [Luma](https://github.com/ecklf/lg-luma) (MIT); no code was copied.
