@@ -101,6 +101,12 @@ impl Home {
     }
 
     pub fn set_tv_settings(&mut self, settings: Option<TvSettings>) {
+        // As Home, Quick Start+ is offered once while it is off: without it, a cold start shows
+        // LG's Home until Homebrew Channel's boot scripts let Vision take over.
+        let off = settings.as_ref().and_then(|t| t.get("option.quickStartMode")) == Some("off");
+        if off && self.home_mode && !self.prefs.ui.quick_start_offered && matches!(self.mode, Mode::Browse) && self.loaded {
+            self.mode = Mode::Offer { yes: true, kind: OfferKind::QuickStart };
+        }
         self.tv_settings = settings;
     }
 

@@ -54,6 +54,8 @@ pub struct UiPrefs {
     pub free_memory: bool,
     /// Glass: `stacked` (a large clock with the forecast) or `inline` (one line).
     pub clock_style: String,
+    /// Turning on the TV's Quick Start+ was offered once (as Home).
+    pub quick_start_offered: bool,
 }
 
 impl Default for UiPrefs {
@@ -73,6 +75,7 @@ impl Default for UiPrefs {
             wallpaper: "valley".into(),
             free_memory: true,
             clock_style: "stacked".into(),
+            quick_start_offered: false,
         }
     }
 }
@@ -114,6 +117,7 @@ impl Prefs {
             wallpaper: ui.and_then(|u| u.get("wallpaper")).and_then(Value::as_str).unwrap_or(&defaults.wallpaper).to_string(),
             free_memory: flag("freeMemory", defaults.free_memory),
             clock_style: ui.and_then(|u| u.get("clockStyle")).and_then(Value::as_str).unwrap_or(&defaults.clock_style).to_string(),
+            quick_start_offered: flag("quickStartOffered", defaults.quick_start_offered),
         };
         Self { order: list("order"), hidden: list("hidden"), ui }
     }
@@ -142,6 +146,7 @@ impl Prefs {
                 "wallpaper": ui.wallpaper,
                 "freeMemory": ui.free_memory,
                 "clockStyle": ui.clock_style,
+                "quickStartOffered": ui.quick_start_offered,
             },
         });
         std::fs::write(&temp, serde_json::to_vec_pretty(&body).unwrap_or_default())?;

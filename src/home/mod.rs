@@ -263,13 +263,20 @@ struct Menu {
     focus: usize,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum OfferKind {
+    TiviOne,
+    /// As Home: the TV's Quick Start+, so Vision is there the moment the TV turns on.
+    QuickStart,
+}
+
 enum Mode {
     Browse,
     Menu(Menu),
     Move { original: Vec<String> },
     Setup { service: Service, closing_at: Option<Instant> },
-    /// One-time TiviOne offer; `yes` = focus on "Turn on".
-    Offer { yes: bool },
+    /// A one-time offer (connect TiviOne, turn on Quick Start+); `yes` = focus on "Turn on".
+    Offer { yes: bool, kind: OfferKind },
     /// Choosing the Home Assistant entities for the Home row.
     Picker(Picker),
     /// The Settings panel (opened from the gear in the header).
@@ -728,7 +735,7 @@ impl Home {
                 changed
             }
             (Target::MenuItem(i), Mode::Menu(menu)) => std::mem::replace(&mut menu.focus, i) != i,
-            (Target::Offer(yes), Mode::Offer { yes: current }) => std::mem::replace(current, yes) != yes,
+            (Target::Offer(yes), Mode::Offer { yes: current, .. }) => std::mem::replace(current, yes) != yes,
             (Target::PickerCategory(i), Mode::Picker(p)) => {
                 let changed = p.column != 0 || p.category != i;
                 if p.category != i {
@@ -847,6 +854,10 @@ impl Home {
             self.active = FAVORITES;
         }
         self.restore_focus(if self.loaded { focused_id } else { None });
+        // As Home, once: whether Quick Start+ is off (see set_tv_settings).
+        if !self.loaded && self.home_mode && !self.prefs.ui.quick_start_offered {
+            self.pending.push(Action::TvSettings);
+        }
         self.loaded = true;
         self.refocus(true);
     }
@@ -1001,7 +1012,7 @@ impl Home {
         let installed = self.apps.iter().any(|a| a.id == TIVIONE_APP) && !self.tivione_too_old();
         if !self.offered && installed && self.status.tivione.is_none() && matches!(self.mode, Mode::Browse) && self.loaded {
             self.offered = true;
-            self.mode = Mode::Offer { yes: true };
+            self.mode = Mode::Offer { yes: true, kind: OfferKind::TiviOne };
         }
     }
 
@@ -1908,21 +1919,27 @@ impl Home {
     }
 
     fn offer_key(&mut self, key: Key) -> Option<Action> {
-        let Mode::Offer { yes } = &mut self.mode else { return None };
-        match key {
-            Key::Left | Key::Right => *yes = !*yes,
-            Key::Ok => {
-                let choice = *yes;
-                self.mode = Mode::Browse;
-                return Some(Action::Service(ServiceRequest::TiviOne(choice)));
+        let Mode::Offer { yes, kind } = &mut self.mode else { return None };
+        let kind = *kind;
+        let choice = match key {
+            Key::Left | Key::Right => {
+                *yes = !*yes;
+                return None;
             }
-            Key::Back => {
-                self.mode = Mode::Browse;
-                return Some(Action::Service(ServiceRequest::TiviOne(false)));
+            Key::Ok => *yes,
+            Key::Back => false,
+            _ => return None,
+        };
+        self.mode = Mode::Browse;
+        match kind {
+            OfferKind::TiviOne => Some(Action::Service(ServiceRequest::TiviOne(choice))),
+            OfferKind::QuickStart => {
+                self.prefs.ui.quick_start_offered = true;
+                self.pending.push(Action::SavePrefs(self.prefs.clone()));
+                let tv = self.tv_settings.as_mut().filter(|_| choice)?;
+                Some(tv::set(tv, "option.quickStartMode", "on".into()))
             }
-            _ => {}
         }
-        None
     }
 
     /// Direct channel entry with the digit keys (TiviOne on): tunes after a short pause or OK.

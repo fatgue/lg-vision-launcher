@@ -168,18 +168,22 @@ impl Home {
 
     pub(super) fn draw_offer(&self, r: &mut Renderer, text: &mut Text) {
         let open = self.overlay.value.clamp(0.0, 1.0);
-        let Mode::Offer { yes } = self.mode else { return };
+        let Mode::Offer { yes, kind } = self.mode else { return };
         if open <= 0.01 {
             return;
         }
         let s = self.strings;
+        let (title, body) = match kind {
+            OfferKind::TiviOne => (s.offer_title, s.offer_body),
+            OfferKind::QuickStart => (s.quick_start_title, s.quick_start_body),
+        };
         r.rect(Rect::new(0.0, 0.0, LOGICAL_W, LOGICAL_H), 0.0, BG.alpha(0.6 * open));
-        let lines = wrap(text, r, s.offer_body, SETUP_BODY, 800.0 - 112.0);
+        let lines = wrap(text, r, body, SETUP_BODY, 800.0 - 112.0);
         let height = 140.0 + lines.len() as f32 * 42.0 + 48.0 + 64.0 + 52.0;
         let panel = Rect::new(560.0, (LOGICAL_H - height) * 0.5 + 20.0 * (1.0 - open), 800.0, height);
         self.panel(r, panel, open);
         let x = panel.x + 56.0;
-        text.draw_top(r, s.offer_title, x, panel.y + 52.0, SETUP_TITLE, TEXT.alpha(open));
+        text.draw_top(r, title, x, panel.y + 52.0, SETUP_TITLE, TEXT.alpha(open));
         let mut y = panel.y + 140.0;
         for line in &lines {
             text.draw_top(r, line, x, y, SETUP_BODY, TEXT.alpha(0.8 * open));
