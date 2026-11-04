@@ -28,6 +28,7 @@ Rust + SDL2 + a custom OpenGL ES 2 renderer, around 3 MB, no web view.
 - **Six languages:** English, German, French, Spanish, Italian, Turkish (follows the TV, can be changed).
 - **Magic Remote:** point to focus, click to open, hold for options, wheel to step along a row.
 - **Two looks:** Cinematic and Glass (see below), switchable in Settings while Vision runs.
+- **Intro:** when the TV starts, a short cinematic intro: "VISION" in steel with depth, a sweeping light and an anamorphic flare, drawn live (any key skips it; Settings → Appearance → Intro on start).
 
 ## Homebrew app store
 
@@ -144,7 +145,7 @@ features; Vision only shows what TiviOne shares with it, and only after you agre
   - Clock: 24- or 12-hour, date, clock style (Glass)
   - Home button: Vision as Home on or off
   - Rows: show or hide each row
-  - Appearance: theme, wallpaper and a photo from your phone (Glass), ambient light (Cinematic), motion, live preview
+  - Appearance: theme, wallpaper and a photo from your phone (Glass), ambient light (Cinematic), motion, live preview, intro on start
   - System: Vision update (when there is one), language, closing unused apps when memory is low (as Home), reload app images, version
   - TV: the TV's own settings: Home when the TV turns on, Quick Start+, picture mode, brightness and contrast
     (Left / Right), energy saving, Ultra HD Deep Colour per HDMI input, sound mode and output, sleep timer, auto power

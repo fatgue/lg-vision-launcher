@@ -437,6 +437,31 @@ impl Text {
         pen - x
     }
 
+    /// Draws `text` centred on `cx` with its baseline at `y`, scaled from the style's size (the
+    /// glyphs are rasterised once at full size). `color` gets each letter's index and its
+    /// centre across the word (0 at the left edge, 1 at the right).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_scaled(&mut self, renderer: &mut Renderer, text: &str, cx: f32, y: f32, style: Style, scale: f32, color: impl Fn(usize, f32) -> Rgba) {
+        let size = style.size.round();
+        let width = self.measure(renderer, text, style);
+        let mut pen = 0.0;
+        let mut previous = None;
+        for (i, ch) in text.chars().enumerate() {
+            if let Some(prev) = previous {
+                pen += self.fonts[style.weight as usize].horizontal_kern(prev, ch, size).unwrap_or(0.0);
+            }
+            let glyph = self.glyph(renderer, Key::new(style, ch));
+            if glyph.w > 0.0 {
+                let left = cx + (pen + glyph.xmin - width * 0.5) * scale;
+                let top = y - (glyph.ymin + glyph.h) * scale;
+                let centre = (pen + glyph.advance * 0.5) / width.max(1.0);
+                renderer.glyph(self.atlas, Rect::new(left, top, glyph.w * scale, glyph.h * scale), glyph.uv, color(i, centre));
+            }
+            pen += glyph.advance + style.tracking * size;
+            previous = Some(ch);
+        }
+    }
+
     /// Draws one icon (or any character) centred on (cx, cy) by its visible shape.
     pub fn icon(&mut self, renderer: &mut Renderer, ch: char, cx: f32, cy: f32, style: Style, color: Rgba) {
         let glyph = self.glyph(renderer, Key::new(style, ch));

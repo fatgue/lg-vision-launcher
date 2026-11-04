@@ -390,6 +390,8 @@ enum SettingId {
     VisionUpdate,
     /// The live preview with a single-connection provider.
     PreviewSingle,
+    /// The intro when Vision starts.
+    Intro,
     /// A row of Settings > TV (an index into `tv::TV_ROWS`).
     Tv(usize),
     Info,
@@ -1718,6 +1720,7 @@ impl Home {
             item(SettingId::Motion, s.motion, if ui.reduced_motion { s.reduced } else { s.full }.to_string(), None),
             item(SettingId::Preview, s.live_preview, onoff(ui.preview), Some(ui.preview)),
             item(SettingId::PreviewSingle, s.preview_single, onoff(ui.preview_single), Some(ui.preview_single)),
+            item(SettingId::Intro, s.intro, onoff(ui.intro), Some(ui.intro)),
         ]);
         let language = match crate::strings::LANGUAGES.iter().find(|(code, _, _)| *code == ui.language) {
             Some((_, name, _)) => name.to_string(),
@@ -1880,6 +1883,7 @@ impl Home {
             SettingId::Motion => ui.reduced_motion = !ui.reduced_motion,
             SettingId::Preview => ui.preview = !ui.preview,
             SettingId::PreviewSingle => ui.preview_single = !ui.preview_single,
+            SettingId::Intro => ui.intro = !ui.intro,
             SettingId::FreeMemory => ui.free_memory = !ui.free_memory,
             SettingId::Tv(row) => return self.tv_change(row),
             SettingId::ClockStyle => ui.clock_style = if ui.clock_style == "inline" { "stacked" } else { "inline" }.to_string(),

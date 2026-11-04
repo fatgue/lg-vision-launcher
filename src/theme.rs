@@ -78,6 +78,8 @@ pub const GLASS_BG: Rgba = Rgba::hex(0x0B0B0F);
 pub const GLASS_LABEL: Style = Style::new(Weight::SemiBold, 26.0);
 pub const GLASS_SECTION: Style = Style::new(Weight::SemiBold, 30.0);
 pub const GLASS_CLOCK: Style = Style::new(Weight::SemiBold, 46.0);
+/// The intro's word (`intro.rs`), drawn scaled.
+pub const INTRO: Style = Style::new(Weight::SemiBold, 210.0).tracking(0.16);
 /// Date and time in one line at the top left, and the weather under it.
 pub const GLASS_DATE: Style = Style::new(Weight::Medium, 36.0);
 pub const GLASS_WEATHER: Style = Style::new(Weight::Regular, 27.0);
@@ -205,6 +207,7 @@ pub fn prewarm_jobs(strings: &Strings) -> Vec<(Style, String)> {
     let upper = latin.to_uppercase() + &ui.to_uppercase();
     let mut jobs = vec![
         (BRAND, "Vision".to_string()),
+        (INTRO, "VISION".to_string()),
         (CLOCK, "0123456789:".to_string()),
         (HEADER, ui.clone()),
         (EYEBROW, upper),

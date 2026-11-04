@@ -11,6 +11,7 @@ mod dynlib;
 mod gl;
 mod home;
 mod installer;
+mod intro;
 mod log;
 #[cfg(all(target_os = "linux", target_arch = "arm"))]
 mod luna;
@@ -200,6 +201,8 @@ fn run(started: Instant) -> Result<(), String> {
     );
     let t_glyphs = started.elapsed();
     let free_memory = prefs.ui.free_memory;
+    // The intro on a cold start; scripted runs (screenshots, benchmarks) skip it unless --intro.
+    let mut intro = (prefs.ui.intro && (options.frames.is_none() || args.iter().any(|a| a == "--intro"))).then(intro::Intro::new);
     let mut home = Home::new(&renderer, prefs, look);
     home.set_home_mode(home_mode);
     // --sample-weather: weather and a forecast on the desktop (no location there).
@@ -278,6 +281,15 @@ fn run(started: Instant) -> Result<(), String> {
             unsafe { (sdl.wait_event_timeout)(&mut event, timeout) }
         };
         while got != 0 {
+            // Any key or click during the intro skips it (and does nothing else).
+            if intro.is_some() && matches!(event.kind(), sdl::KEYDOWN | sdl::MOUSEBUTTONDOWN) {
+                if let Some(i) = intro.as_mut() {
+                    i.skip();
+                }
+                dirty = true;
+                got = unsafe { (sdl.poll_event)(&mut event) };
+                continue;
+            }
             match event.kind() {
                 sdl::QUIT | sdl::APP_TERMINATING => break 'main,
                 sdl::LIFECYCLE_EVENT if event.user_code() == 2 => break 'main,
@@ -476,6 +488,13 @@ fn run(started: Instant) -> Result<(), String> {
         let dt = options.fixed_dt.unwrap_or_else(|| frame_start.duration_since(last_frame).as_secs_f32().min(0.05));
         last_frame = frame_start;
         animating = home.update(dt) || home.waiting() || theme_switch.is_some();
+        if let Some(i) = intro.as_mut() {
+            if i.step(dt) {
+                animating = true;
+            } else {
+                intro = None;
+            }
+        }
         while let Some(action) = home.take_action() {
             if let Action::SetTheme(next) = action {
                 // Fonts and glyphs for the new look load in the background; the old look keeps
@@ -507,6 +526,9 @@ fn run(started: Instant) -> Result<(), String> {
         renderer.begin((w, h), home.look().background());
         let began = Instant::now();
         home.draw(&mut renderer, &mut text, &now);
+        if let Some(i) = &intro {
+            i.draw(&mut renderer, &mut text);
+        }
         renderer.end();
         let submitted = Instant::now();
         let last = options.frames.is_some_and(|n| frames + 1 >= n);
