@@ -1,6 +1,6 @@
 {
   "id": "com.vision.launcher",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "vendor": "fatgue",
   "type": "native",
   "main": "vision",
