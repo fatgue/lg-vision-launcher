@@ -33,7 +33,7 @@ function install() {
     if (/"state"\s*:\s*"installed"/.test(out)) {
       ssh('killall luna-send 2>/dev/null; rm -f /tmp/vision.ipk');
       // While Vision is Home, the mount still holds the previous binary: re-apply it.
-      ssh('[ -x /var/lib/vision-home/home.sh ] && sh /var/lib/vision-home/home.sh refresh; true');
+      ssh('[ -x /var/lib/vision-home/home.sh ] && sh /media/developer/apps/usr/palm/applications/com.vision.launcher/home.sh refresh; true');
       console.log(`installed ${id} ${version}`);
       return;
     }
