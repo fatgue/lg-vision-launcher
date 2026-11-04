@@ -56,6 +56,9 @@ pub struct UiPrefs {
     pub clock_style: String,
     /// Turning on the TV's Quick Start+ was offered once (as Home).
     pub quick_start_offered: bool,
+    /// Home Assistant: the user's order of rooms (by name) and of devices (by entity id).
+    pub room_order: Vec<String>,
+    pub device_order: Vec<String>,
 }
 
 impl Default for UiPrefs {
@@ -76,6 +79,8 @@ impl Default for UiPrefs {
             free_memory: true,
             clock_style: "stacked".into(),
             quick_start_offered: false,
+            room_order: Vec::new(),
+            device_order: Vec::new(),
         }
     }
 }
@@ -97,6 +102,12 @@ impl Prefs {
         };
         let ui = value.get("ui");
         let flag = |key: &str, default: bool| ui.and_then(|u| u.get(key)).and_then(Value::as_bool).unwrap_or(default);
+        let strings = |key: &str| -> Vec<String> {
+            ui.and_then(|u| u.get(key))
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default()
+        };
         let defaults = UiPrefs::default();
         let ui = UiPrefs {
             weather: flag("weather", defaults.weather),
@@ -118,6 +129,8 @@ impl Prefs {
             free_memory: flag("freeMemory", defaults.free_memory),
             clock_style: ui.and_then(|u| u.get("clockStyle")).and_then(Value::as_str).unwrap_or(&defaults.clock_style).to_string(),
             quick_start_offered: flag("quickStartOffered", defaults.quick_start_offered),
+            room_order: strings("roomOrder"),
+            device_order: strings("deviceOrder"),
         };
         Self { order: list("order"), hidden: list("hidden"), ui }
     }
@@ -147,6 +160,8 @@ impl Prefs {
                 "freeMemory": ui.free_memory,
                 "clockStyle": ui.clock_style,
                 "quickStartOffered": ui.quick_start_offered,
+                "roomOrder": ui.room_order,
+                "deviceOrder": ui.device_order,
             },
         });
         std::fs::write(&temp, serde_json::to_vec_pretty(&body).unwrap_or_default())?;

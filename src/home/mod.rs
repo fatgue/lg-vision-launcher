@@ -222,6 +222,21 @@ impl Rail {
     }
 
     /// Replaces the tiles, keeping focus on the same id where possible.
+    /// New contents for the same tiles (in the same order) change them in place, so focus and
+    /// its animation stay; anything else replaces them.
+    fn update(&mut self, tiles: Vec<Tile>) {
+        if tiles.len() != self.tiles.len() || tiles.iter().zip(&self.tiles).any(|(a, b)| a.id != b.id) {
+            return self.replace(tiles);
+        }
+        for (old, new) in self.tiles.iter_mut().zip(tiles) {
+            old.title = new.title;
+            old.detail = new.detail;
+            old.kind = new.kind;
+            old.bg = new.bg;
+            old.accent = new.accent;
+        }
+    }
+
     fn replace(&mut self, tiles: Vec<Tile>) {
         let focused = self.tiles.get(self.focus).map(|t| t.id.clone());
         self.tiles = tiles;
@@ -454,6 +469,8 @@ pub struct Home {
     /// Home Assistant entities on Home (grouped into rooms) and the room the device row shows.
     entities: Vec<Entity>,
     devices_room: Option<String>,
+    /// New Home Assistant states: rebuild the device row, keeping its focus.
+    devices_stale: bool,
     active: usize,
     mode: Mode,
     prefs: Prefs,
@@ -563,6 +580,7 @@ impl Home {
             pending: Vec::new(),
             entities: Vec::new(),
             devices_room: None,
+            devices_stale: false,
             preview: None,
             dwell: None,
             preview_paused_until: None,
@@ -931,8 +949,12 @@ impl Home {
 
     pub fn set_entities(&mut self, entities: Vec<Entity>) {
         self.entities = entities;
+        // A room or device being moved keeps its place until it is dropped.
+        if matches!(self.mode, Mode::Move { .. }) {
+            return;
+        }
         self.set_rooms();
-        self.devices_room = None;
+        self.devices_stale = true;
         self.fix_active();
         self.refocus(false);
     }
@@ -943,6 +965,8 @@ impl Home {
         let mut areas: Vec<&str> = self.entities.iter().map(|e| e.area.as_str()).collect();
         areas.sort_by(|a, b| a.is_empty().cmp(&b.is_empty()).then_with(|| a.to_lowercase().cmp(&b.to_lowercase())));
         areas.dedup();
+        let order = &self.prefs.ui.room_order;
+        areas.sort_by_key(|area| order.iter().position(|o| o == area).unwrap_or(usize::MAX));
         let tiles = areas
             .iter()
             .enumerate()
@@ -965,20 +989,25 @@ impl Home {
                 tile
             })
             .collect();
-        self.rails[HOME].replace(tiles);
+        self.rails[HOME].update(tiles);
     }
 
-    /// The device row follows the focused room (like tabs); only a change of room rebuilds it.
+    /// The device row follows the focused room (like tabs). A change of room starts it at its
+    /// first device; new states from Home Assistant keep the focused one.
     fn update_devices(&mut self) {
+        if matches!(self.mode, Mode::Move { .. }) {
+            return;
+        }
         let room = self.rails[HOME].tiles.get(self.rails[HOME].focus).map(|t| t.launch_id.clone());
-        if room == self.devices_room {
+        if room == self.devices_room && !std::mem::take(&mut self.devices_stale) {
             return;
         }
         let s = self.strings;
-        let tiles = self
-            .entities
-            .iter()
-            .filter(|e| Some(&e.area) == room.as_ref())
+        let order = &self.prefs.ui.device_order;
+        let mut devices: Vec<&Entity> = self.entities.iter().filter(|e| Some(&e.area) == room.as_ref()).collect();
+        devices.sort_by_key(|e| order.iter().position(|o| *o == e.id).unwrap_or(usize::MAX));
+        let tiles = devices
+            .into_iter()
             .enumerate()
             .map(|(i, entity)| {
                 let mut tile = Tile::new(entity.id.clone(), entity.name.clone(), Kind::Entity { on: entity.on }, i);
@@ -992,9 +1021,12 @@ impl Home {
         if room != self.devices_room {
             rail.focus = 0;
             rail.scroll = Spring::new(0.0, 16.0);
+            rail.replace(tiles);
+        } else {
+            rail.update(tiles);
         }
-        rail.replace(tiles);
         self.devices_room = room;
+        self.devices_stale = false;
     }
 
     pub fn set_status(&mut self, status: Status) {
@@ -1576,7 +1608,7 @@ impl Home {
     pub fn key(&mut self, key: Key, home_mode: bool) -> Option<Action> {
         let action = match &self.mode {
             Mode::Menu(_) => self.menu_key(key),
-            Mode::Move { .. } if self.look == Look::Glass => self.glass_move_key(key),
+            Mode::Move { .. } if self.look == Look::Glass && self.active == FAVORITES => self.glass_move_key(key),
             Mode::Move { .. } => self.move_key(key),
             Mode::Setup { .. } => self.setup_key(key),
             Mode::Offer { .. } => self.offer_key(key),
@@ -1928,6 +1960,9 @@ impl Home {
             Key::LongOk if self.focused().is_some_and(|t| t.kind == Kind::Promo) => {
                 self.mode = Mode::Menu(Menu { items: vec![MenuItem::HidePromo, MenuItem::Cancel], focus: 0 });
             }
+            Key::LongOk if matches!(active, HOME | DEVICES) && count > 1 => {
+                self.mode = Mode::Menu(Menu { items: vec![MenuItem::Move, MenuItem::Cancel], focus: 0 });
+            }
             Key::LongOk if active == HIDDEN && count > 0 => {
                 self.mode = Mode::Menu(Menu { items: vec![MenuItem::Show, MenuItem::Cancel], focus: 0 });
             }
@@ -2074,7 +2109,7 @@ impl Home {
                     }
                 }
                 self.set_rooms();
-                self.devices_room = None;
+                self.devices_stale = true;
                 let first = (!actions.is_empty()).then(|| actions.remove(0));
                 self.pending.extend(actions);
                 first
@@ -2165,7 +2200,7 @@ impl Home {
     fn run(&mut self, item: MenuItem) -> Option<Action> {
         match item {
             MenuItem::Move => {
-                self.mode = Mode::Move { original: self.rails[FAVORITES].ids() };
+                self.mode = Mode::Move { original: self.rails[self.active].ids() };
                 None
             }
             MenuItem::Hide => {
@@ -2203,7 +2238,8 @@ impl Home {
     }
 
     fn move_key(&mut self, key: Key) -> Option<Action> {
-        let rail = &mut self.rails[FAVORITES];
+        let active = self.active;
+        let rail = &mut self.rails[active];
         let focus = rail.focus;
         match key {
             Key::Left if focus > 0 => {
@@ -2223,7 +2259,7 @@ impl Home {
             Key::Back => {
                 // Revert to the order from before the move.
                 let Mode::Move { original } = std::mem::replace(&mut self.mode, Mode::Browse) else { return None };
-                let rail = &mut self.rails[FAVORITES];
+                let rail = &mut self.rails[active];
                 let id = rail.tiles.get(focus).map(|t| t.id.clone());
                 rail.tiles.sort_by_key(|t| original.iter().position(|o| o == &t.id).unwrap_or(usize::MAX));
                 rail.focus = id.and_then(|id| rail.tiles.iter().position(|t| t.id == id)).unwrap_or(0);
@@ -2235,7 +2271,23 @@ impl Home {
     }
 
     fn save(&mut self) -> Option<Action> {
-        self.prefs.order = self.rails[FAVORITES].ids();
+        match self.active {
+            HOME => {
+                self.prefs.ui.room_order = self.rails[HOME].tiles.iter().map(|t| t.launch_id.clone()).collect();
+            }
+            DEVICES => {
+                // This room's devices in their new order; other rooms keep theirs.
+                let ids = self.rails[DEVICES].ids();
+                let order = &mut self.prefs.ui.device_order;
+                order.retain(|id| !ids.contains(id));
+                order.extend(ids);
+            }
+            _ => self.prefs.order = self.rails[FAVORITES].ids(),
+        }
+        if matches!(self.active, HOME | DEVICES) {
+            self.set_rooms();
+            self.devices_stale = true;
+        }
         Some(Action::SavePrefs(self.prefs.clone()))
     }
 

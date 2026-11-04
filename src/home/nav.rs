@@ -131,6 +131,9 @@ impl Home {
             }
             Key::Down if at + 1 < rows.len() => self.focus_row(rows[at + 1], self.row_center(rail, focus)),
             Key::Ok => return self.activate(),
+            Key::LongOk if matches!(rail, HOME | DEVICES) && count > 1 => {
+                self.mode = Mode::Menu(Menu { items: vec![MenuItem::Move, MenuItem::Cancel], focus: 0 });
+            }
             Key::LongOk if rail == HIDDEN && count > 0 => {
                 self.mode = Mode::Menu(Menu { items: vec![MenuItem::Show, MenuItem::Cancel], focus: 0 });
             }
